@@ -133,10 +133,53 @@ def average_players(
 
 
 @dataclass
+class TeamObjectiveSnapshot:
+    turrets: int = 0
+    outer_turrets: int = 0
+    inner_turrets: int = 0
+    inhibitor_turrets: int = 0
+    nexus_turrets: int = 0
+
+    inhibitors: int = 0
+
+    dragons: int = 0
+    elemental_drakes: int = 0
+    dragon_soul: str | None = None
+
+    heralds: int = 0
+    barons: int = 0
+
+    grubs: int = 0
+
+
+def aggregate_objectives(
+    objectives: TeamObjectiveSnapshot,
+) -> dict:
+    return {
+        "turrets": objectives.turrets,
+        "outer_turrets": objectives.outer_turrets,
+        "inner_turrets": objectives.inner_turrets,
+        "inhibitor_turrets": objectives.inhibitor_turrets,
+        "nexus_turrets": objectives.nexus_turrets,
+        "inhibitors": objectives.inhibitors,
+        "dragons": objectives.dragons,
+        "elemental_drakes": objectives.elemental_drakes,
+        "heralds": objectives.heralds,
+        "barons": objectives.barons,
+        "grubs": objectives.grubs,
+    }
+
+
+@dataclass
 class TeamSnapshot:
     team: int
     timestamp: int
     players: list[PlayerSnapshot]
+    objectives: TeamObjectiveSnapshot = None
+
+    def __post_init__(self):
+        if self.objectives is None:
+            self.objectives = TeamObjectiveSnapshot()
 
     @property
     def gold(self) -> int:
@@ -311,6 +354,14 @@ class LaneSnapshot:
 class GameSnapshot:
     timestamp: int
     players: list[PlayerSnapshot]
+    objectives: dict[int, TeamObjectiveSnapshot] = None
+
+    def __post_init__(self):
+        if self.objectives is None:
+            self.objectives = {
+                100: TeamObjectiveSnapshot(),
+                200: TeamObjectiveSnapshot(),
+            }
 
     @property
     def gold(self) -> int:
@@ -409,11 +460,21 @@ class LaneAnalysis:
 
 
 @dataclass
+class TeamAnalysis:
+    team: int
+    own_team: TeamSnapshot
+    opponent_team: TeamSnapshot
+    comparisons: dict
+    objective_comparisons: dict
+
+
+@dataclass
 class MatchAnalysis:
     game: GameSnapshot
     teams: dict[int, TeamSnapshot]
     players: list[PlayerAnalysis]
     lanes: dict[str, LaneAnalysis]
+    team_comparisons: TeamAnalysis
 
 
 @dataclass

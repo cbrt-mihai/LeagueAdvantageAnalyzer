@@ -5,9 +5,12 @@ from models import (
     GameSnapshot,
     PlayerAnalysis,
     LaneAnalysis,
+    TeamAnalysis,
     MatchAnalysis,
+    TeamObjectiveSnapshot,
     aggregate_players,
     average_players,
+    aggregate_objectives,
 )
 
 from dataclasses import dataclass
@@ -37,6 +40,21 @@ STAT_NAMES = [
     "health_regen",
     "lifesteal",
     "omnivamp",
+]
+
+
+OBJECTIVE_NAMES = [
+    "turrets",
+    "outer_turrets",
+    "inner_turrets",
+    "inhibitor_turrets",
+    "nexus_turrets",
+    "inhibitors",
+    "dragons",
+    "elemental_drakes",
+    "heralds",
+    "barons",
+    "grubs",
 ]
 
 
@@ -571,6 +589,71 @@ def calculate_lane_comparisons(
     return result
 
 
+def calculate_objective_comparisons(
+    own_objectives: TeamObjectiveSnapshot,
+    enemy_objectives: TeamObjectiveSnapshot,
+) -> dict:
+    """Compare objectives between two teams."""
+    own_stats = aggregate_objectives(own_objectives)
+    enemy_stats = aggregate_objectives(enemy_objectives)
+
+    result = {}
+
+    for objective in OBJECTIVE_NAMES:
+        result[objective] = calculate_metric(
+            own_stats[objective],
+            enemy_stats[objective],
+        )
+
+    return result
+
+
+def calculate_team_comparisons(
+    own_team: TeamSnapshot,
+    enemy_team: TeamSnapshot,
+    game: GameSnapshot,
+) -> dict:
+
+    own_team_total = get_stats(own_team)
+    enemy_team_total = get_stats(enemy_team)
+    game_total = get_stats(game)
+
+    own_team_average = get_average_stats(
+        own_team.players
+    )
+
+    enemy_team_average = get_average_stats(
+        enemy_team.players
+    )
+
+    game_average = get_average_stats(
+        game.players
+    )
+
+    result = {}
+
+    for stat in STAT_NAMES:
+        result[stat] = {
+            "vs_opponent_team": calculate_metric(
+                own_team_total[stat],
+                enemy_team_total[stat],
+            ),
+
+            "vs_game": {
+                "total": calculate_metric(
+                    own_team_total[stat],
+                    game_total[stat],
+                ),
+                "average": calculate_metric(
+                    own_team_average[stat],
+                    game_average[stat],
+                ),
+            },
+        }
+
+    return result
+
+
 def build_player_analysis(
     snapshots: list[PlayerSnapshot],
     teams: dict[int, TeamSnapshot],
@@ -687,15 +770,51 @@ def build_lane_analysis(
     return results
 
 
+def build_team_analysis(
+    teams: dict[int, TeamSnapshot],
+    game: GameSnapshot,
+) -> TeamAnalysis:
+
+    own_team = teams[100]
+    enemy_team = teams[200]
+
+    comparisons = calculate_team_comparisons(
+        own_team,
+        enemy_team,
+        game,
+    )
+
+    objective_comparisons = calculate_objective_comparisons(
+        own_team.objectives,
+        enemy_team.objectives,
+    )
+
+    return TeamAnalysis(
+        team=100,
+        own_team=own_team,
+        opponent_team=enemy_team,
+        comparisons=comparisons,
+        objective_comparisons=objective_comparisons,
+    )
+
+
 def build_match_analysis(
     snapshots: list[PlayerSnapshot],
+    objectives: dict[int, TeamObjectiveSnapshot] = None,
 ) -> MatchAnalysis:
+
+    if objectives is None:
+        objectives = {
+            100: TeamObjectiveSnapshot(),
+            200: TeamObjectiveSnapshot(),
+        }
 
     timestamp = snapshots[0].timestamp
 
     game = GameSnapshot(
         timestamp=timestamp,
         players=snapshots,
+        objectives=objectives,
     )
 
     teams = {
@@ -707,6 +826,7 @@ def build_match_analysis(
                 for player in snapshots
                 if player.team == 100
             ],
+            objectives=objectives.get(100, TeamObjectiveSnapshot()),
         ),
 
         200: TeamSnapshot(
@@ -717,6 +837,7 @@ def build_match_analysis(
                 for player in snapshots
                 if player.team == 200
             ],
+            objectives=objectives.get(200, TeamObjectiveSnapshot()),
         ),
     }
 
@@ -732,11 +853,17 @@ def build_match_analysis(
         game,
     )
 
+    team_analysis = build_team_analysis(
+        teams,
+        game,
+    )
+
     return MatchAnalysis(
         game=game,
         teams=teams,
         players=player_analysis,
         lanes=lane_analysis,
+        team_comparisons=team_analysis,
     )
 
 

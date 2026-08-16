@@ -29,6 +29,21 @@ STAT_NAMES = [
 ]
 
 
+OBJECTIVE_NAMES = [
+    "turrets",
+    "outer_turrets",
+    "inner_turrets",
+    "inhibitor_turrets",
+    "nexus_turrets",
+    "inhibitors",
+    "dragons",
+    "elemental_drakes",
+    "heralds",
+    "barons",
+    "grubs",
+]
+
+
 # ---------------------------------------------------------------------------
 # Aggregation rules
 # ---------------------------------------------------------------------------
