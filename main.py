@@ -122,16 +122,13 @@ class Writer:
 
 def format_metric(metric):
     ratio = metric["ratio"]
-
-    if ratio is None:
-        ratio_text = "N/A"
-    else:
-        ratio_text = f"{ratio:.2f}x"
+    ratio_text = "N/A" if ratio is None else f"{ratio:.2f}x"
+    diff_val = metric["difference"]
 
     return (
         f"{metric['value']:>9.2f}"
         f" vs {metric['reference']:>9.2f}"
-        f"   diff {metric['difference']:>+9.2f}"
+        f"   diff {diff_val:>+9.2f}"
         f"   {ratio_text:>7}"
     )
 
@@ -139,6 +136,26 @@ def format_metric(metric):
 # ---------------------------------------------------------------------------
 # Per-interval report
 # ---------------------------------------------------------------------------
+
+def calculate_player_overall_advantage(player_analysis):
+    """Sum normalized differences across key metrics vs lane opponent."""
+    score = 0.0
+    for stat, metric in player_analysis.comparisons.items():
+        diff = metric["vs_opponent"]["difference"]
+        if stat in LOWER_IS_BETTER:
+            diff = -diff
+        score += diff
+    return score
+
+
+def get_ranked_players(analysis):
+    """Returns player analyses sorted from best overall performance to worst."""
+    return sorted(
+        analysis.players,
+        key=calculate_player_overall_advantage,
+        reverse=True
+    )
+
 
 def print_advantage_report(analysis, w: Writer, stats=None):
     if stats is None:
@@ -196,10 +213,7 @@ def print_advantage_report(analysis, w: Writer, stats=None):
     w.print("\nPLAYER ADVANTAGE (vs lane opponent)")
     w.print("  " + "-" * 100)
 
-    for player_analysis in sorted(
-        analysis.players,
-        key=lambda item: item.player.participant_id,
-    ):
+    for player_analysis in get_ranked_players(analysis):
         player = player_analysis.player
         opponent = player_analysis.opponent
 
@@ -270,55 +284,61 @@ def _print_summary_row(label, summary, w: Writer, indent="  "):
 # Player extremes & stat spectrum reports
 # ---------------------------------------------------------------------------
 
+LOWER_IS_BETTER = {"deaths"}
+
+
+def get_stat_extremes(players, stat):
+    """Finds best and worst values, accounting for stat direction and filtering non-distinct values."""
+    values = [getattr(p, stat) for p in players]
+    min_val, max_val = min(values), max(values)
+
+    # Ignore if all players share the exact same value (e.g., all 0 AH at min 1)
+    if min_val == max_val:
+        return None, None
+
+    if stat in LOWER_IS_BETTER:
+        best_val, worst_val = min_val, max_val
+    else:
+        best_val, worst_val = max_val, min_val
+
+    best_players = [p for p in players if getattr(p, stat) == best_val]
+    worst_players = [p for p in players if getattr(p, stat) == worst_val]
+
+    return (best_val, best_players), (worst_val, worst_players)
+
+
 def print_player_extremes(analysis, w: Writer, stats=None):
-    """For each player, print which stats they were best/worst at."""
+    """For each player, print which stats they were best/worst at, supporting ties."""
     if stats is None:
         stats = REPORT_STATS
 
     players = analysis.game.players
+    best_map = {p.participant_id: [] for p in players}
+    worst_map = {p.participant_id: [] for p in players}
 
-    # Build a lookup of stat -> (best_player, worst_player)
-    stat_extremes = {}
     for stat in stats:
-        values = [(p, getattr(p, stat)) for p in players]
-        values_sorted = sorted(values, key=lambda x: x[1], reverse=True)
-        best_player = values_sorted[0][0]
-        worst_player = values_sorted[-1][0]
-        stat_extremes[stat] = {
-            "best": best_player,
-            "worst": worst_player,
-            "best_value": values_sorted[0][1],
-            "worst_value": values_sorted[-1][1],
-        }
+        res = get_stat_extremes(players, stat)
+        if not res or res[0] is None:
+            continue
+
+        (best_val, best_players), (worst_val, worst_players) = res
+
+        for p in best_players:
+            best_map[p.participant_id].append(f"{stat} ({best_val:.0f})")
+        for p in worst_players:
+            worst_map[p.participant_id].append(f"{stat} ({worst_val:.0f})")
 
     w.print("\nPLAYER EXTREMES (Best/Worst at each stat)")
     w.print("  " + "-" * 100)
 
-    # For each player, find which stats they were best/worst at
     for player in sorted(players, key=lambda p: p.participant_id):
-        best_stats = []
-        worst_stats = []
+        pid = player.participant_id
+        b_str = ", ".join(best_map[pid]) if best_map[pid] else "(none)"
+        w_str = ", ".join(worst_map[pid]) if worst_map[pid] else "(none)"
 
-        for stat in stats:
-            if stat_extremes[stat]["best"].participant_id == player.participant_id:
-                best_stats.append(f"{stat} ({stat_extremes[stat]['best_value']:.0f})")
-            if stat_extremes[stat]["worst"].participant_id == player.participant_id:
-                worst_stats.append(f"{stat} ({stat_extremes[stat]['worst_value']:.0f})")
-
-        w.print(
-            f"\n  [{player.participant_id:>2}] {player.champion:<14} "
-            f"(Team {player.team}, {player.lane})"
-        )
-
-        if best_stats:
-            w.print(f"       BEST at:  {', '.join(best_stats)}")
-        else:
-            w.print(f"       BEST at:  (none)")
-
-        if worst_stats:
-            w.print(f"       WORST at: {', '.join(worst_stats)}")
-        else:
-            w.print(f"       WORST at: (none)")
+        w.print(f"\n  [{pid:>2}] {player.champion:<14} (Team {player.team}, {player.lane})")
+        w.print(f"       BEST at:  {b_str}")
+        w.print(f"       WORST at: {w_str}")
 
 
 def print_stat_spectrum(analysis, w: Writer, stats=None):
@@ -706,6 +726,29 @@ def print_impactful_differences_report(analyses, w: Writer, stats=None):
                 f"Team 200: {final_event['reference']:.0f} "
                 f"(final diff: {final_event['difference']:>+.0f})"
             )
+
+
+def print_team_timeline_tables(analyses, w: Writer):
+    """Prints total team stats across all timestamps."""
+    w.print("\n" + "=" * 110)
+    w.print("TEAM STATS TIMELINE (TOTALS & AVERAGES)")
+    w.print("=" * 110)
+
+    timestamps = [a.game.timestamp / 1000 / 60 for a in analyses]
+
+    for team_id in [100, 200]:
+        w.print(f"\nTEAM {team_id} TOTALS")
+        header = f"  {'Stat':<20}" + "".join([f"{ts:>7.0f}m" for ts in timestamps])
+        w.print(header)
+        w.print("  " + "-" * (20 + 7 * len(timestamps)))
+
+        for stat in ["gold", "xp", "cs", "kills", "deaths", "assists"]:
+            row = f"  {stat:<20}"
+            for a in analyses:
+                t_snap = a.teams[team_id]
+                val = getattr(t_snap, stat)
+                row += f"{val:>7.0f}"
+            w.print(row)
 
 
 def print_final_report(analyses, w: Writer, stats=None):
@@ -1115,13 +1158,13 @@ def main():
 
     print(f"\nGenerated {len(analyses)} analyses.")
 
+    game_duration_sec = match["info"]["gameDuration"]
     report_start = parse_time("1:00")
-    report_end = parse_time("30:00")
+    report_end = game_duration_sec
 
     report_analyses = [
-        a
-        for a in analyses
-        if report_start <= a.game.timestamp / 1000 <= report_end
+        a for a in analyses
+        if report_start <= (a.game.timestamp / 1000) <= report_end
     ]
 
     # Build the output file name from the match ID and current time
@@ -1184,6 +1227,8 @@ def main():
         # Short average report (new condensed format)
         # ----------------------------------------------------------------
         print_short_average_report(report_analyses, w)
+
+        print_team_timeline_tables(report_analyses, w)
 
         # ----------------------------------------------------------------
         # Impactful differences report (new)
