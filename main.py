@@ -1,4 +1,5 @@
 import sys
+import json
 import datetime
 import os
 
@@ -476,6 +477,134 @@ def calculate_player_advantage_score(player_analysis):
         )
 
     return _score_from_differences(normalized)
+
+
+def calculate_pairwise_player_score(player, opponent):
+    """
+    Calculate a directional Advantage Score for one player relative to
+    another player.
+
+    Positive = player has the advantage over opponent.
+    Negative = player is behind opponent.
+
+    Each stat is normalized independently using the existing
+    ADVANTAGE_SCORE_THRESHOLDS, then the normalized stat scores are
+    averaged.
+
+    This is intentionally independent of the player's normal lane-opponent
+    comparison.
+    """
+    normalized = []
+
+    for stat, threshold in ADVANTAGE_SCORE_THRESHOLDS.items():
+        if threshold is None:
+            continue
+
+        player_value = getattr(player, stat, 0.0)
+        opponent_value = getattr(opponent, stat, 0.0)
+
+        difference = player_value - opponent_value
+
+        if stat in LOWER_IS_BETTER:
+            difference = -difference
+
+        normalized.append(
+            _normalized_advantage(difference, threshold)
+        )
+
+    return _score_from_differences(normalized)
+
+
+def calculate_relative_player_score(player, comparison_pool):
+    """
+    Calculate a player's Advantage Score relative to every other player
+    in the supplied comparison pool.
+
+    The player's score is the mean of all pairwise normalized comparisons.
+
+    Examples:
+        Lane: player vs the other player(s) in the same lane.
+        Team: player vs every teammate.
+        Game: player vs every other player in the game.
+
+    Returns:
+        A score from -100 to +100.
+    """
+    opponents = [
+        opponent
+        for opponent in comparison_pool
+        if opponent.participant_id != player.participant_id
+    ]
+
+    if not opponents:
+        return 0.0
+
+    pairwise_scores = [
+        calculate_pairwise_player_score(player, opponent)
+        for opponent in opponents
+    ]
+
+    return sum(pairwise_scores) / len(pairwise_scores)
+
+
+def calculate_contextual_player_scores(analysis):
+    """
+    Calculate three different player Advantage Scores for the final
+    rankings:
+
+        lane_score  = player vs every other player in their lane
+        team_score  = player vs every other player on their team
+        game_score  = player vs every other player in the game
+
+    Returns:
+        {
+            participant_id: {
+                "player_analysis": ...,
+                "lane_score": ...,
+                "team_score": ...,
+                "game_score": ...,
+            }
+        }
+    """
+    players = list(analysis.game.players)
+
+    result = {}
+
+    for player in players:
+        lane_pool = [
+            other
+            for other in players
+            if other.lane == player.lane
+        ]
+
+        team_pool = [
+            other
+            for other in players
+            if other.team == player.team
+        ]
+
+        game_pool = players
+
+        result[player.participant_id] = {
+            "player_analysis": _get_player_analysis(
+                analysis,
+                player.participant_id,
+            ),
+            "lane_score": calculate_relative_player_score(
+                player,
+                lane_pool,
+            ),
+            "team_score": calculate_relative_player_score(
+                player,
+                team_pool,
+            ),
+            "game_score": calculate_relative_player_score(
+                player,
+                game_pool,
+            ),
+        }
+
+    return result
 
 
 def calculate_lane_advantage_score(lane_analysis):
@@ -1519,23 +1648,18 @@ def _get_player_analysis(analysis, participant_id):
 
 def _get_final_player_scores(analysis):
     """
-    Return:
-        {
-            participant_id: {
-                "player_analysis": ...,
-                "score": ...,
-            }
-        }
+    Return the contextual final player scores used by the final rankings.
+
+    The three scores intentionally use different comparison populations:
+
+        lane_score = player vs other players in the same lane
+        team_score = player vs other players on the same team
+        game_score = player vs every other player in the game
+
+    The original lane-opponent Advantage Score remains available through
+    calculate_player_advantage_score() for the normal player analysis.
     """
-    result = {}
-
-    for player_analysis in analysis.players:
-        result[player_analysis.player.participant_id] = {
-            "player_analysis": player_analysis,
-            "score": calculate_player_advantage_score(player_analysis),
-        }
-
-    return result
+    return calculate_contextual_player_scores(analysis)
 
 
 def print_advantage_score_evolution(analyses, w: Writer):
@@ -1687,30 +1811,45 @@ def print_advantage_score_evolution(analyses, w: Writer):
 
 def print_final_advantage_rankings(analysis, w: Writer):
     """
-    Prints all requested final rankings:
+    Prints final contextual player rankings.
 
-      - best/worst champion of every lane
-      - best/worst player of every team
-      - best/worst player of the entire game
-      - final Advantage Score for every champion
-      - team rank for every champion
-      - overall game rank for every champion
+    Each ranking uses a different comparison population:
+
+        Lane:
+            player vs every other player in that lane
+
+        Team:
+            player vs every other player on that team
+
+        Game:
+            player vs every other player in the game
     """
     player_scores = _get_final_player_scores(analysis)
 
-    ranked = sorted(
+    # ---------------------------------------------------------------
+    # Build contextual rankings
+    # ---------------------------------------------------------------
+
+    lane_rankings = {}
+    team_rankings = {}
+    game_ranked = sorted(
         player_scores.values(),
-        key=lambda item: item["score"],
+        key=lambda item: item["game_score"],
         reverse=True,
     )
 
-    # ---------------------------------------------------------------
-    # Overall and team ranks
-    # ---------------------------------------------------------------
-    overall_rank = {
-        item["player_analysis"].player.participant_id: rank
-        for rank, item in enumerate(ranked, start=1)
-    }
+    for lane_name in LANE_ORDER:
+        lane_items = [
+            item
+            for item in player_scores.values()
+            if item["player_analysis"].player.lane == lane_name
+        ]
+
+        lane_rankings[lane_name] = sorted(
+            lane_items,
+            key=lambda item: item["lane_score"],
+            reverse=True,
+        )
 
     blue_players = sorted(
         [
@@ -1718,7 +1857,7 @@ def print_final_advantage_rankings(analysis, w: Writer):
             for item in player_scores.values()
             if item["player_analysis"].player.team == REPORT_BLUE_TEAM
         ],
-        key=lambda item: item["score"],
+        key=lambda item: item["team_score"],
         reverse=True,
     )
 
@@ -1730,116 +1869,134 @@ def print_final_advantage_rankings(analysis, w: Writer):
             for item in player_scores.values()
             if item["player_analysis"].player.team == red_team_id
         ],
-        key=lambda item: item["score"],
+        key=lambda item: item["team_score"],
         reverse=True,
     )
+
+    team_rankings["Blue"] = blue_players
+    team_rankings["Red"] = red_players
+
+    # ---------------------------------------------------------------
+    # Overall game ranks
+    # ---------------------------------------------------------------
+
+    overall_rank = {
+        item["player_analysis"].player.participant_id: rank
+        for rank, item in enumerate(game_ranked, start=1)
+    }
+
+    # ---------------------------------------------------------------
+    # Team ranks
+    # ---------------------------------------------------------------
 
     team_rank = {}
 
     for rank, item in enumerate(blue_players, start=1):
-        team_rank[item["player_analysis"].player.participant_id] = rank
+        team_rank[
+            item["player_analysis"].player.participant_id
+        ] = rank
 
     for rank, item in enumerate(red_players, start=1):
-        team_rank[item["player_analysis"].player.participant_id] = rank
+        team_rank[
+            item["player_analysis"].player.participant_id
+        ] = rank
+
+    # ---------------------------------------------------------------
+    # Header
+    # ---------------------------------------------------------------
 
     w.print("\n" + "=" * 110)
     w.print("FINAL ADVANTAGE RANKINGS")
     w.print("=" * 110)
 
     w.print(
-        "\nFinal Advantage Score is champion-relative: "
-        "positive means the champion finished ahead of their lane opponent."
+        "\nRanking scores are contextual pairwise Advantage Scores."
     )
     w.print(
-        "Team Rank is within that champion's team. "
-        "Overall Rank is across all 10 players."
+        "Each score compares the player against every other player "
+        "in the relevant comparison pool."
+    )
+    w.print(
+        "Lane = same lane | Team = same team | Game = all other players."
+    )
+    w.print(
+        "Each pairwise stat difference is normalized using the existing "
+        "Advantage Score thresholds before aggregation."
     )
 
     # ---------------------------------------------------------------
-    # Complete ranking table
+    # Complete game ranking
     # ---------------------------------------------------------------
-    w.print("\nFINAL CHAMPION / PLAYER RANKING")
+
+    w.print("\nFINAL PLAYER GAME RANKING")
     w.print("  " + "-" * 110)
     w.print(
-        f"  {'Overall':>7}  "
-        f"{'Team':>5}  "
+        f"  {'Rank':>5}  "
         f"{'Team':<6}  "
         f"{'Lane':<9}  "
         f"{'Champion':<16}  "
         f"{'Player':<24}  "
-        f"{'Advantage':>10}"
+        f"{'Game Score':>11}"
     )
     w.print("  " + "-" * 110)
 
-    for item in ranked:
-        pa = item["player_analysis"]
-        player = pa.player
-        score = item["score"]
+    for item in game_ranked:
+        player = item["player_analysis"].player
 
         w.print(
-            f"  #{overall_rank[player.participant_id]:>6}  "
-            f"#{team_rank[player.participant_id]:>4}  "
+            f"  #{overall_rank[player.participant_id]:>4}  "
             f"{team_label(player.team):<6}  "
             f"{player.lane:<9}  "
             f"{player.champion:<16}  "
             f"{(player.name + '#' + player.tag):<24}  "
-            f"{score:+10.1f}"
+            f"{item['game_score']:+11.1f}"
         )
 
     # ---------------------------------------------------------------
-    # Best / Worst Champion of each lane
+    # Best / Worst Player of Each Lane
     # ---------------------------------------------------------------
-    w.print("\nBEST / WORST CHAMPION OF EACH LANE")
-    w.print("  " + "-" * 100)
+
+    w.print("\nBEST / WORST PLAYER OF EACH LANE")
+    w.print("  " + "-" * 110)
 
     for lane_name in LANE_ORDER:
-        # Only players assigned to this specific lane.
-        lane_players = [
-            item
-            for item in player_scores.values()
-            if item["player_analysis"].player.lane == lane_name
-        ]
+        lane_items = lane_rankings[lane_name]
 
-        if not lane_players:
+        if not lane_items:
             continue
 
-        lane_players.sort(
-            key=lambda item: item["score"],
-            reverse=True,
-        )
-
-        best = lane_players[0]
-        worst = lane_players[-1]
+        best = lane_items[0]
+        worst = lane_items[-1]
 
         best_p = best["player_analysis"].player
         worst_p = worst["player_analysis"].player
 
-        w.print(
-            f"\n  {lane_name}:"
-        )
+        w.print(f"\n  {lane_name}:")
+
         w.print(
             f"    BEST:  {best_p.champion:<16} "
             f"({best_p.name}#{best_p.tag}) "
             f"[{team_label(best_p.team)}] "
-            f"Score {best['score']:+.1f}"
+            f"Lane Score {best['lane_score']:+.1f}"
         )
+
         w.print(
             f"    WORST: {worst_p.champion:<16} "
             f"({worst_p.name}#{worst_p.tag}) "
             f"[{team_label(worst_p.team)}] "
-            f"Score {worst['score']:+.1f}"
+            f"Lane Score {worst['lane_score']:+.1f}"
         )
 
     # ---------------------------------------------------------------
-    # Best / Worst player of each team
+    # Best / Worst Player of Each Team
     # ---------------------------------------------------------------
-    w.print("\nBEST / WORST PLAYER OF EACH TEAM")
-    w.print("  " + "-" * 100)
 
-    for team_name, team_items in (
-        ("Blue", blue_players),
-        ("Red", red_players),
-    ):
+    w.print("\nBEST / WORST PLAYER OF EACH TEAM")
+    w.print("  " + "-" * 110)
+
+    for team_name in ("Blue", "Red"):
+        team_items = team_rankings[team_name]
+
         if not team_items:
             continue
 
@@ -1850,42 +2007,88 @@ def print_final_advantage_rankings(analysis, w: Writer):
         worst_p = worst["player_analysis"].player
 
         w.print(f"\n  {team_name}:")
+
         w.print(
             f"    BEST:  {best_p.champion:<16} "
             f"({best_p.name}#{best_p.tag}) "
-            f"{best['score']:+.1f}"
+            f"Team Score {best['team_score']:+.1f}"
         )
+
         w.print(
             f"    WORST: {worst_p.champion:<16} "
             f"({worst_p.name}#{worst_p.tag}) "
-            f"{worst['score']:+.1f}"
+            f"Team Score {worst['team_score']:+.1f}"
         )
 
     # ---------------------------------------------------------------
-    # Best / Worst entire game
+    # Best / Worst Player of Entire Game
     # ---------------------------------------------------------------
-    best = ranked[0]
-    worst = ranked[-1]
 
-    best_p = best["player_analysis"].player
-    worst_p = worst["player_analysis"].player
+    if game_ranked:
+        best = game_ranked[0]
+        worst = game_ranked[-1]
 
-    w.print("\nBEST / WORST PLAYER OF THE ENTIRE GAME")
-    w.print("  " + "-" * 100)
+        best_p = best["player_analysis"].player
+        worst_p = worst["player_analysis"].player
 
+        w.print("\nBEST / WORST PLAYER OF THE ENTIRE GAME")
+        w.print("  " + "-" * 110)
+
+        w.print(
+            f"  BEST:  {best_p.champion:<16} "
+            f"({best_p.name}#{best_p.tag}) "
+            f"[{team_label(best_p.team)} / {best_p.lane}] "
+            f"Game Score {best['game_score']:+.1f}"
+        )
+
+        w.print(
+            f"  WORST: {worst_p.champion:<16} "
+            f"({worst_p.name}#{worst_p.tag}) "
+            f"[{team_label(worst_p.team)} / {worst_p.lane}] "
+            f"Game Score {worst['game_score']:+.1f}"
+        )
+
+    # ---------------------------------------------------------------
+    # All contextual scores
+    # ---------------------------------------------------------------
+
+    w.print("\nCONTEXTUAL PLAYER ADVANTAGE SCORES")
+    w.print("  " + "-" * 110)
     w.print(
-        f"  BEST:  {best_p.champion:<16} "
-        f"({best_p.name}#{best_p.tag}) "
-        f"[{team_label(best_p.team)} / {best_p.lane}] "
-        f"Score {best['score']:+.1f}"
+        f"  {'Team':<6}  "
+        f"{'Lane':<9}  "
+        f"{'Champion':<16}  "
+        f"{'Player':<24}  "
+        f"{'Lane':>11}  "
+        f"{'Team':>11}  "
+        f"{'Game':>11}"
+    )
+    w.print("  " + "-" * 110)
+
+    ordered = sorted(
+        player_scores.values(),
+        key=lambda item: (
+            0
+            if item["player_analysis"].player.team == REPORT_BLUE_TEAM
+            else 1,
+            LANE_ORDER.index(item["player_analysis"].player.lane)
+            if item["player_analysis"].player.lane in LANE_ORDER
+            else 99,
+        ),
     )
 
-    w.print(
-        f"  WORST: {worst_p.champion:<16} "
-        f"({worst_p.name}#{worst_p.tag}) "
-        f"[{team_label(worst_p.team)} / {worst_p.lane}] "
-        f"Score {worst['score']:+.1f}"
-    )
+    for item in ordered:
+        player = item["player_analysis"].player
+
+        w.print(
+            f"  {team_label(player.team):<6}  "
+            f"{player.lane:<9}  "
+            f"{player.champion:<16}  "
+            f"{(player.name + '#' + player.tag):<24}  "
+            f"{item['lane_score']:>+11.1f}  "
+            f"{item['team_score']:>+11.1f}  "
+            f"{item['game_score']:>+11.1f}"
+        )
 
 
 def print_main_final_report(analyses, w: Writer, stats=None):
@@ -2400,7 +2603,7 @@ def write_match_summary_markdown(final_analysis, report_analyses, players, outpu
 
         ranked = sorted(
             final_scores.values(),
-            key=lambda item: item["score"],
+            key=lambda item: item["game_score"],
             reverse=True,
         )
 
@@ -2410,7 +2613,7 @@ def write_match_summary_markdown(final_analysis, report_analyses, players, outpu
                 for item in final_scores.values()
                 if item["player_analysis"].player.team == REPORT_BLUE_TEAM
             ],
-            key=lambda item: item["score"],
+            key=lambda item: item["team_score"],
             reverse=True,
         )
 
@@ -2420,7 +2623,7 @@ def write_match_summary_markdown(final_analysis, report_analyses, players, outpu
                 for item in final_scores.values()
                 if item["player_analysis"].player.team != REPORT_BLUE_TEAM
             ],
-            key=lambda item: item["score"],
+            key=lambda item: item["team_score"],
             reverse=True,
         )
 
@@ -2444,12 +2647,12 @@ def write_match_summary_markdown(final_analysis, report_analyses, players, outpu
         # ---------------------------------------------------------------
         # Every champion
         # ---------------------------------------------------------------
-        f.write("### Final Advantage Score for Every Champion\n\n")
+        f.write("### Final Contextual Player Advantage Scores\n\n")
         f.write(
-            "| Overall Rank | Team Rank | Team | Lane | Champion | Player | Final Advantage Score |\n"
+            "| Game Rank | Team Rank | Team | Lane | Champion | Player | Lane Score | Team Score | Game Score |\n"
         )
         f.write(
-            "|---:|---:|---|---|---|---|---:|\n"
+            "|---:|---:|---|---|---|---|---:|---:|---:|\n"
         )
 
         for item in ranked:
@@ -2463,7 +2666,9 @@ def write_match_summary_markdown(final_analysis, report_analyses, players, outpu
                 f"{p.lane} | "
                 f"**{p.champion}** | "
                 f"{p.name}#{p.tag} | "
-                f"**{item['score']:+.1f}** |\n"
+                f"{item['lane_score']:+.1f} | "
+                f"{item['team_score']:+.1f} | "
+                f"**{item['game_score']:+.1f}** |\n"
             )
 
         f.write("\n")
@@ -2471,10 +2676,10 @@ def write_match_summary_markdown(final_analysis, report_analyses, players, outpu
         # ---------------------------------------------------------------
         # Best / Worst Champion of Each Lane
         # ---------------------------------------------------------------
-        f.write("### Best / Worst Champion of Each Lane\n\n")
+        f.write("### Best / Worst Player of Each Lane\n\n")
 
         f.write(
-            "| Lane | Best Champion | Score | Worst Champion | Score |\n"
+            "| Lane | Best Player | Lane Score | Worst Player | Lane Score |\n"
         )
         f.write(
             "|---|---|---:|---|---:|\n"
@@ -2491,7 +2696,7 @@ def write_match_summary_markdown(final_analysis, report_analyses, players, outpu
                 continue
 
             lane_players.sort(
-                key=lambda item: item["score"],
+                key=lambda item: item["lane_score"],
                 reverse=True,
             )
 
@@ -2504,9 +2709,9 @@ def write_match_summary_markdown(final_analysis, report_analyses, players, outpu
             f.write(
                 f"| {lane_name} | "
                 f"**{best_p.champion}** ({team_label(best_p.team)}) | "
-                f"{best['score']:+.1f} | "
+                f"{best['lane_score']:+.1f} | "
                 f"**{worst_p.champion}** ({team_label(worst_p.team)}) | "
-                f"{worst['score']:+.1f} |\n"
+                f"{worst['lane_score']:+.1f} |\n"
             )
 
         f.write("\n")
@@ -2517,7 +2722,7 @@ def write_match_summary_markdown(final_analysis, report_analyses, players, outpu
         f.write("### Best / Worst Player of Each Team\n\n")
 
         f.write(
-            "| Team | Best Player | Score | Worst Player | Score |\n"
+            "| Team | Best Player | Team Score | Worst Player | Team Score |\n"
         )
         f.write(
             "|---|---|---:|---|---:|\n"
@@ -2539,9 +2744,9 @@ def write_match_summary_markdown(final_analysis, report_analyses, players, outpu
             f.write(
                 f"| {team_name} | "
                 f"**{best_p.champion}** ({best_p.name}) | "
-                f"{best['score']:+.1f} | "
+                f"{best['team_score']:+.1f} | "
                 f"**{worst_p.champion}** ({worst_p.name}) | "
-                f"{worst['score']:+.1f} |\n"
+                f"{worst['team_score']:+.1f} |\n"
             )
 
         f.write("\n")
@@ -2561,14 +2766,14 @@ def write_match_summary_markdown(final_analysis, report_analyses, players, outpu
             f"- **BEST:** **{best_p.champion}** "
             f"({best_p.name}#{best_p.tag}, "
             f"{team_label(best_p.team)} {best_p.lane}) — "
-            f"Advantage Score **{best['score']:+.1f}**.\n"
+            f"Game Advantage Score **{best['game_score']:+.1f}**.\n"
         )
 
         f.write(
             f"- **WORST:** **{worst_p.champion}** "
             f"({worst_p.name}#{worst_p.tag}, "
             f"{team_label(worst_p.team)} {worst_p.lane}) — "
-            f"Advantage Score **{worst['score']:+.1f}**.\n"
+            f"Game Advantage Score **{worst['game_score']:+.1f}**.\n"
         )
 
         f.write("\n")
@@ -2969,6 +3174,26 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"\nGenerating reports in directory: {output_dir}")
+
+    # Save raw Riot API responses for debugging / analysis.
+    raw_api_file = os.path.join(
+        output_dir,
+        "raw_api_response.json",
+    )
+
+    with open(raw_api_file, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "match_id": match_id,
+                "match": match,
+                "timeline": timeline,
+            },
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    print(f"Raw API response saved to: {raw_api_file}")
 
     # 1. Generate Stat Spectrum Report
     spectrum_file = os.path.join(output_dir, "stat_spectrum.txt")
