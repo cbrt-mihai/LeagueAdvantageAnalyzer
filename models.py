@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Optional
+from config import BLUE_TEAM_ID, RED_TEAM_ID
 
 
 @dataclass
@@ -224,7 +225,7 @@ class LaneSnapshot(BaseGroupSnapshot):
 class GameSnapshot(BaseGroupSnapshot):
     timestamp: int
     players: list[PlayerSnapshot]
-    objectives: dict[int, TeamObjectiveSnapshot] = field(default_factory=lambda: {100: TeamObjectiveSnapshot(), 200: TeamObjectiveSnapshot()})
+    objectives: dict[int, TeamObjectiveSnapshot] = field(default_factory=lambda: {BLUE_TEAM_ID: TeamObjectiveSnapshot(), RED_TEAM_ID: TeamObjectiveSnapshot()})
 
 
 def aggregate_objectives(objectives: TeamObjectiveSnapshot) -> dict:

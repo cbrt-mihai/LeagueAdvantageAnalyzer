@@ -15,6 +15,7 @@ from models import (
 
 from dataclasses import dataclass
 from typing import Optional
+from config import BLUE_TEAM_ID, RED_TEAM_ID
 
 
 STAT_NAMES = [
@@ -205,7 +206,7 @@ def get_comparison_reference(
         )
 
     if target == "enemy_team":
-        enemy_team = 200 if player.team == 100 else 100
+        enemy_team = RED_TEAM_ID if player.team == BLUE_TEAM_ID else BLUE_TEAM_ID
 
         return TeamSnapshot(
             team=enemy_team,
@@ -724,7 +725,7 @@ def build_lane_analysis(
     snapshots: list[PlayerSnapshot],
     teams: dict[int, TeamSnapshot],
     game: GameSnapshot,
-    perspective_team: int = 100,
+    perspective_team: int = BLUE_TEAM_ID,
 ) -> dict[str, LaneAnalysis]:
 
     lanes = [
@@ -736,7 +737,7 @@ def build_lane_analysis(
     ]
 
     results = {}
-    opponent_team = 200 if perspective_team == 100 else 100
+    opponent_team = RED_TEAM_ID if perspective_team == BLUE_TEAM_ID else RED_TEAM_ID
 
     for lane in lanes:
 
@@ -792,11 +793,11 @@ def build_lane_analysis(
 def build_team_analysis(
     teams: dict[int, TeamSnapshot],
     game: GameSnapshot,
-    perspective_team: int = 100,
+    perspective_team: int = BLUE_TEAM_ID,
 ) -> TeamAnalysis:
 
     own_team = teams[perspective_team]
-    enemy_team = teams[200 if perspective_team == 100 else 100]
+    enemy_team = teams[RED_TEAM_ID if perspective_team == BLUE_TEAM_ID else BLUE_TEAM_ID]
 
     comparisons = calculate_team_comparisons(
         own_team,
@@ -821,13 +822,13 @@ def build_team_analysis(
 def build_match_analysis(
     snapshots: list[PlayerSnapshot],
     objectives: dict[int, TeamObjectiveSnapshot] = None,
-    perspective_team: int = 100,
+    perspective_team: int = BLUE_TEAM_ID,
 ) -> MatchAnalysis:
 
     if objectives is None:
         objectives = {
-            100: TeamObjectiveSnapshot(),
-            200: TeamObjectiveSnapshot(),
+            BLUE_TEAM_ID: TeamObjectiveSnapshot(),
+            RED_TEAM_ID: TeamObjectiveSnapshot(),
         }
 
     timestamp = snapshots[0].timestamp
@@ -839,26 +840,26 @@ def build_match_analysis(
     )
 
     teams = {
-        100: TeamSnapshot(
-            team=100,
+        BLUE_TEAM_ID: TeamSnapshot(
+            team=BLUE_TEAM_ID,
             timestamp=timestamp,
             players=[
                 player
                 for player in snapshots
-                if player.team == 100
+                if player.team == BLUE_TEAM_ID
             ],
-            objectives=objectives.get(100, TeamObjectiveSnapshot()),
+            objectives=objectives.get(BLUE_TEAM_ID, TeamObjectiveSnapshot()),
         ),
 
-        200: TeamSnapshot(
-            team=200,
+        RED_TEAM_ID: TeamSnapshot(
+            team=RED_TEAM_ID,
             timestamp=timestamp,
             players=[
                 player
                 for player in snapshots
-                if player.team == 200
+                if player.team == RED_TEAM_ID
             ],
-            objectives=objectives.get(200, TeamObjectiveSnapshot()),
+            objectives=objectives.get(RED_TEAM_ID, TeamObjectiveSnapshot()),
         ),
     }
 

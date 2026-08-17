@@ -18,15 +18,15 @@ from comparisons import (
 
 from models import PlayerSnapshot, TeamObjectiveSnapshot
 from advantages import build_match_analysis, STAT_NAMES, OBJECTIVE_NAMES
+from config import *
 
 # All stats are reported by default.  Override this list to restrict output.
 REPORT_STATS = STAT_NAMES
 
 # Report-facing team labels are intentionally independent from Riot's internal
 # team IDs (100/200). Blue is always the script runner's team; Red is the opponent.
-REPORT_BLUE_TEAM = 100
+REPORT_BLUE_TEAM = BLUE_TEAM_ID
 REPORT_RUNNER_PARTICIPANT_ID = None
-LANE_ORDER = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
 
 def set_report_perspective(runner_team, runner_participant_id=None):
     global REPORT_BLUE_TEAM, REPORT_RUNNER_PARTICIPANT_ID
@@ -60,54 +60,18 @@ def ordered_snapshots(players):
         ),
     )
 
-# Updated thresholds to include combat metrics
-IMPACTFUL_THRESHOLDS = {
-    "gold": 500,
-    "xp": 300,
-    "cs": 10,
-    "level": 1,
-    "kills": 1,
-    "deaths": 1,
-    "assists": 2,
-    "kda": 1.0,
-    "gold_per_minute": 50,
-    "cs_per_minute": 1.0,
-    "attack_damage": 20,
-    "ability_power": 30,
-    "health": 200,
-    "max_health": 200,
-    "armor": 10,
-    "magic_resist": 10,
-    "attack_speed": 0.1,
-    "movement_speed": 10,
-    "ability_haste": 10,
-    "armor_pen": 5,
-    "armor_pen_percent": 5,
-    "magic_pen": 5,
-    "magic_pen_percent": 5,
-    "health_regen": 5,
-    "lifesteal": 5,
-    "omnivamp": 3,
-}
-
-IMPACTFUL_OBJECTIVE_THRESHOLDS = {
-    "turrets": 1,
-    "outer_turrets": 1,
-    "inner_turrets": 1,
-    "inhibitor_turrets": 1,
-    "nexus_turrets": 1,
-    "inhibitors": 1,
-    "dragons": 1,
-    "elemental_drakes": 1,
-    "heralds": 1,
-    "barons": 1,
-    "grubs": 1,
-}
 
 ADVANCED_STAT_KEYS = [
-    "kp_pct", "gold_share", "dmg_share",
-    "gold_efficiency", "vision_score", "wards_placed", "wards_killed"
+    "kp_pct",
+    "gold_share",
+    "dmg_share",
+    "gold_efficiency",
+    "vision_score",
+    "wards_placed",
+    "wards_killed"
 ]
+
+MAX_PLAYERS = 10
 
 
 def extract_kda_from_events(events, up_to_timestamp):
@@ -121,7 +85,7 @@ def extract_kda_from_events(events, up_to_timestamp):
             "wards_killed": 0,
             "vision_score": 0.0,
         }
-        for i in range(1, 11)
+        for i in range(1, MAX_PLAYERS + 1)
     }
 
     for event in events:
@@ -378,50 +342,7 @@ def _print_summary_row(label, summary, w: Writer, indent="  "):
 #
 # Deaths are inverted because fewer deaths is better.
 #
-LOWER_IS_BETTER = {"deaths"}
 
-ADVANTAGE_SCORE_THRESHOLDS = {
-    # Economy / progression
-    "gold": 500.0,
-    "gold_per_minute": 50.0,
-    "xp": 300.0,
-    "cs": 10.0,
-    "cs_per_minute": 1.0,
-    "level": 1.0,
-
-    # Combat
-    "kills": 1.0,
-    "deaths": 1.0,
-    "assists": 2.0,
-    "kda": 1.0,
-
-    # Combat stats
-    "attack_damage": 20.0,
-    "ability_power": 30.0,
-    "health": 200.0,
-    "max_health": 200.0,
-    "armor": 10.0,
-    "magic_resist": 10.0,
-    "attack_speed": 0.10,
-    "movement_speed": 10.0,
-    "ability_haste": 10.0,
-    "armor_pen": 5.0,
-    "armor_pen_percent": 5.0,
-    "magic_pen": 5.0,
-    "magic_pen_percent": 5.0,
-    "health_regen": 5.0,
-    "lifesteal": 5.0,
-    "omnivamp": 3.0,
-
-    # Advanced / efficiency
-    "kp_pct": 5.0,
-    "gold_share": 5.0,
-    "dmg_share": 5.0,
-    "gold_efficiency": 0.25,
-    "vision_score": 3.0,
-    "wards_placed": 2.0,
-    "wards_killed": 2.0,
-}
 
 OBJECTIVE_ADVANTAGE_THRESHOLDS = {
     objective: 1.0
@@ -680,8 +601,8 @@ def calculate_team_advantage_score(team_analysis):
 
     if stat_scores and objective_scores:
         return (
-            stat_score * 0.70
-            + objective_score * 0.30
+            stat_score * STAT_SCORE_WEIGHT
+            + objective_score * OBJ_SCORE_WEIGHT
         )
 
     if stat_scores:
@@ -697,17 +618,17 @@ def advantage_label(score):
     """
     Human-readable interpretation of an Advantage Score.
     """
-    if score >= 50:
+    if score >= ADVANTAGE_STRONG_THRESHOLD:
         return "Strong Blue advantage"
-    if score >= 20:
+    if score >= ADVANTAGE_MODERATE_THRESHOLD:
         return "Blue advantage"
-    if score > 5:
+    if score > ADVANTAGE_SLIGHT_THRESHOLD:
         return "Slight Blue advantage"
-    if score <= -50:
+    if score <= -ADVANTAGE_STRONG_THRESHOLD:
         return "Strong Red advantage"
-    if score <= -20:
+    if score <= -ADVANTAGE_MODERATE_THRESHOLD:
         return "Red advantage"
-    if score < -5:
+    if score < -ADVANTAGE_SLIGHT_THRESHOLD:
         return "Slight Red advantage"
 
     return "Even"
@@ -722,9 +643,9 @@ def champion_advantage_direction(score, team_id):
 
     This is intentionally different from the Blue-centric team/lane score.
     """
-    if score > 5:
+    if score > ADVANTAGE_AHEAD:
         return "Ahead"
-    if score < -5:
+    if score < -ADVANTAGE_AHEAD:
         return "Behind"
     return "Even"
 
@@ -733,9 +654,9 @@ def format_advantage_score(score):
     """
     Compact report representation.
     """
-    if score > 5:
+    if score > ADVANTAGE_AHEAD:
         return f"{score:+6.1f}  ↑"
-    if score < -5:
+    if score < -ADVANTAGE_AHEAD:
         return f"{score:+6.1f}  ↓"
     return f"{score:+6.1f}  ="
 
@@ -1190,19 +1111,19 @@ def print_team_timeline_tables(analyses, w: Writer):
     CHUNK_SIZE = 10
     total_frames = len(analyses)
 
-    for team_id in [100, 200]:
+    for team_id in [BLUE_TEAM_ID, RED_TEAM_ID]:
         w.print(f"\n--- TEAM {team_id} TOTALS ---")
         for start_idx in range(0, total_frames, CHUNK_SIZE):
             chunk = analyses[start_idx:start_idx + CHUNK_SIZE]
             timestamps = [a.game.timestamp / 1000 / 60 for a in chunk]
 
             # Standardized 8-character width per column
-            header = f"  {'Stat':<12}" + "".join([f"{f'{int(ts)}m':>8}" for ts in timestamps])
+            header = f"  {'Stat':<20}" + "".join([f"{f'{int(ts)}m':>8}" for ts in timestamps])
             w.print("\n" + header)
-            w.print("  " + "-" * (12 + 8 * len(timestamps)))
+            w.print("  " + "-" * (20 + 8 * len(timestamps)))
 
-            for stat in ["gold", "xp", "cs", "kills", "deaths", "assists"]:
-                row = f"  {stat:<12}"
+            for stat in STAT_NAMES:
+                row = f"  {stat:<20}"
                 for a in chunk:
                     t_snap = a.teams[team_id]
                     val = getattr(t_snap, stat, 0)
@@ -1468,8 +1389,8 @@ def create_snapshots(frame, players, kda_stats=None):
 def extract_objectives_from_events(events, up_to_timestamp):
     """Extract objective counts from timeline events up to a given timestamp."""
     objectives = {
-        100: TeamObjectiveSnapshot(),
-        200: TeamObjectiveSnapshot(),
+        BLUE_TEAM_ID: TeamObjectiveSnapshot(),
+        RED_TEAM_ID: TeamObjectiveSnapshot(),
     }
 
     for event in events:
@@ -1479,7 +1400,7 @@ def extract_objectives_from_events(events, up_to_timestamp):
         event_type = event.get("type")
 
         if event_type == "BUILDING_KILL":
-            team = 100 if event.get("teamId") == 200 else 200  # Team that killed gets credit
+            team = BLUE_TEAM_ID if event.get("teamId") == RED_TEAM_ID else RED_TEAM_ID  # Team that killed gets credit
             building_type = event.get("buildingType")
             tower_type = event.get("towerType", "")
 
@@ -1517,7 +1438,11 @@ def extract_objectives_from_events(events, up_to_timestamp):
 
 
 def compute_frame_advanced_metrics(snapshots):
-    teams = {100: [p for p in snapshots if p.team == 100], 200: [p for p in snapshots if p.team == 200]}
+    teams = {
+        BLUE_TEAM_ID: [p for p in snapshots if p.team == BLUE_TEAM_ID],
+        RED_TEAM_ID: [p for p in snapshots if p.team == RED_TEAM_ID]
+    }
+
     for team_id, team_players in teams.items():
         team_kills = max(1, sum(p.kills for p in team_players))
         team_gold = max(1, sum(p.gold for p in team_players))
@@ -1527,10 +1452,10 @@ def compute_frame_advanced_metrics(snapshots):
             p.kp_pct = ((p.kills + p.assists) / team_kills) * 100.0
             p.gold_share = (p.gold / team_gold) * 100.0
             p.dmg_share = (p.total_damage / team_dmg) * 100.0
-            p.gold_efficiency = (p.dmg_share / max(0.01, p.gold_share)) if p.gold_share > 0 else 0.0
+            p.gold_efficiency = (p.dmg_share / max(SMALLEST_NONZERO,p.gold_share)) if p.gold_share > 0 else 0.0
 
 
-def analyze_timeline(frames, players, interval_seconds=60, all_events=None, perspective_team=100):
+def analyze_timeline(frames, players, interval_seconds=60, all_events=None, perspective_team=BLUE_TEAM_ID):
     analyses = []
     interval_ms = interval_seconds * 1000
     max_timestamp = frames[-1]["timestamp"]
@@ -1861,7 +1786,7 @@ def print_final_advantage_rankings(analysis, w: Writer):
         reverse=True,
     )
 
-    red_team_id = 200 if REPORT_BLUE_TEAM == 100 else 100
+    red_team_id = RED_TEAM_ID if REPORT_BLUE_TEAM == BLUE_TEAM_ID else BLUE_TEAM_ID
 
     red_players = sorted(
         [
@@ -2157,7 +2082,7 @@ def write_swings_report(report_analyses, output_dir):
         w.print("=" * 80)
         w.print("GAME SWINGS & MOMENTUM SHIFTS")
         w.print("=" * 80)
-        w.print("  (Tracking Gold/XP shifts >= 1,500, Teamfights >= 3 Kills, or Objective Takes)\n")
+        w.print(f"  (Tracking Gold/XP shifts >= {GOLD_SWING_THRESHOLD}/{XP_SWING_THRESHOLD}, Teamfights >= {KILLS_THRESHOLD} Kills, or Objective Takes)\n")
 
         swings_found = 0
 
@@ -2169,44 +2094,44 @@ def write_swings_report(report_analyses, output_dir):
             curr_time = curr.game.timestamp / 1000 / 60
 
             # Resource Shifts
-            prev_gold_diff = prev.teams[100].gold - prev.teams[200].gold
-            curr_gold_diff = curr.teams[100].gold - curr.teams[200].gold
+            prev_gold_diff = prev.teams[BLUE_TEAM_ID].gold - prev.teams[RED_TEAM_ID].gold
+            curr_gold_diff = curr.teams[BLUE_TEAM_ID].gold - curr.teams[RED_TEAM_ID].gold
             gold_swing = curr_gold_diff - prev_gold_diff
 
-            prev_xp_diff = prev.teams[100].xp - prev.teams[200].xp
-            curr_xp_diff = curr.teams[100].xp - curr.teams[200].xp
+            prev_xp_diff = prev.teams[BLUE_TEAM_ID].xp - prev.teams[RED_TEAM_ID].xp
+            curr_xp_diff = curr.teams[BLUE_TEAM_ID].xp - curr.teams[RED_TEAM_ID].xp
             xp_swing = curr_xp_diff - prev_xp_diff
 
             # Combat / Kill Deltas (Teamfights)
-            t100_kills = curr.teams[100].kills - prev.teams[100].kills
-            t200_kills = curr.teams[200].kills - prev.teams[200].kills
-            total_interval_kills = t100_kills + t200_kills
+            tBlue_kills = curr.teams[BLUE_TEAM_ID].kills - prev.teams[BLUE_TEAM_ID].kills
+            tRed_kills = curr.teams[RED_TEAM_ID].kills - prev.teams[RED_TEAM_ID].kills
+            total_interval_kills = tBlue_kills + tRed_kills
 
             # Objective Deltas (Pushes & Neutral Objectives)
-            t100_objs = _get_objective_deltas(prev.teams[100].objectives, curr.teams[100].objectives)
-            t200_objs = _get_objective_deltas(prev.teams[200].objectives, curr.teams[200].objectives)
-            has_objectives = bool(t100_objs or t200_objs)
+            tBlue_objs = _get_objective_deltas(prev.teams[BLUE_TEAM_ID].objectives, curr.teams[BLUE_TEAM_ID].objectives)
+            tRed_objs = _get_objective_deltas(prev.teams[RED_TEAM_ID].objectives, curr.teams[RED_TEAM_ID].objectives)
+            has_objectives = bool(tBlue_objs or tRed_objs)
 
             # Swing conditions: Big economic shift, multi-kill teamfight, or objective capture with gold movement
             if (
-                abs(gold_swing) >= 1500
-                or abs(xp_swing) >= 1500
-                or total_interval_kills >= 3
-                or (has_objectives and abs(gold_swing) >= 800)
+                abs(gold_swing) >= GOLD_SWING_THRESHOLD
+                or abs(xp_swing) >= XP_SWING_THRESHOLD
+                or total_interval_kills >= KILLS_THRESHOLD
+                or (has_objectives and abs(gold_swing) >= MIN_GOLD_SWING_THRESHOLD)
             ):
                 swings_found += 1
-                favored_team = 100 if gold_swing >= 0 else 200
+                favored_team = BLUE_TEAM_ID if gold_swing >= 0 else RED_TEAM_ID
 
                 w.print(f"[{prev_time:.0f}m -> {curr_time:.0f}m] MOMENTUM SWING")
                 w.print(f"  Favored Team: {team_label(favored_team)}")
                 w.print(f"  Gold Swing:   {gold_swing:+7.0f} (Net Diff: {curr_gold_diff:+7.0f})")
                 w.print(f"  XP Swing:     {xp_swing:+7.0f} (Net Diff: {curr_xp_diff:+7.0f})")
-                w.print(f"  Teamfights:   Blue (+{t100_kills if REPORT_BLUE_TEAM == 100 else t200_kills} kills) vs Red (+{t200_kills if REPORT_BLUE_TEAM == 100 else t100_kills} kills)")
+                w.print(f"  Teamfights:   Blue (+{tBlue_kills if REPORT_BLUE_TEAM == BLUE_TEAM_ID else tRed_kills} kills) vs Red (+{tRed_kills if REPORT_BLUE_TEAM == BLUE_TEAM_ID else tBlue_kills} kills)")
 
-                if t100_objs:
-                    w.print(f"  {team_label(100)} Objectives: {', '.join(t100_objs)}")
-                if t200_objs:
-                    w.print(f"  {team_label(200)} Objectives: {', '.join(t200_objs)}")
+                if tBlue_objs:
+                    w.print(f"  {team_label(BLUE_TEAM_ID)} Objectives: {', '.join(tBlue_objs)}")
+                if tRed_objs:
+                    w.print(f"  {team_label(RED_TEAM_ID)} Objectives: {', '.join(tRed_objs)}")
                 w.print("")
 
         if swings_found == 0:
@@ -2290,7 +2215,7 @@ def write_objectives_report(all_events, output_dir):
                 detail = f"Plate ({e.get('laneType', '')})"
                 team = e.get("teamId", "N/A")
 
-            w.print(f"  {ts_min:5.1f}m   {etype:<24}  {detail:<20}  {team_label(team) if isinstance(team, int) and team in (100, 200) else team}")
+            w.print(f"  {ts_min:5.1f}m   {etype:<24}  {detail:<20}  {team_label(team) if isinstance(team, int) and team in (BLUE_TEAM_ID, RED_TEAM_ID) else team}")
 
 
 def write_match_summary_markdown(final_analysis, report_analyses, players, output_dir):
@@ -2299,7 +2224,7 @@ def write_match_summary_markdown(final_analysis, report_analyses, players, outpu
     game_duration_min = final_analysis.game.timestamp / 1000 / 60
 
     blue_final = final_analysis.teams[REPORT_BLUE_TEAM]
-    red_team_id = 200 if REPORT_BLUE_TEAM == 100 else 100
+    red_team_id = RED_TEAM_ID if REPORT_BLUE_TEAM == BLUE_TEAM_ID else BLUE_TEAM_ID
     red_final = final_analysis.teams[red_team_id]
     ordered_players = ordered_snapshots(final_analysis.game.players)
 
@@ -2814,7 +2739,7 @@ def calculate_advanced_metrics(player_snap, team_snap):
     dmg_share = (player_dmg / max(1, team_dmg)) * 100.0 if team_dmg > 0 else 0.0
 
     # 4. Gold Efficiency Ratio (Damage Share / Gold Share)
-    gold_eff = (dmg_share / max(0.01, gold_share)) if gold_share > 0 else 0.0
+    gold_eff = (dmg_share / max(SMALLEST_NONZERO,gold_share)) if gold_share > 0 else 0.0
 
     # 5. Vision Metrics
     vision_score = getattr(player_snap, "vision_score", 0)
@@ -2997,7 +2922,7 @@ def write_lane_report(lane_name, report_analyses, output_dir, stats=None):
 
 def enrich_analysis_frame(analysis):
     """Calculates advanced metrics on player models and injects player/lane comparison dicts for any timestamp frame."""
-    for team_id in [100, 200]:
+    for team_id in [BLUE_TEAM_ID, RED_TEAM_ID]:
         t_snap = analysis.teams[team_id]
         team_players = [p for p in analysis.game.players if p.team == team_id]
 
@@ -3014,7 +2939,7 @@ def enrich_analysis_frame(analysis):
             p.kp_pct = ((p_kills + p_assists) / max(1, t_snap.kills)) * 100.0
             p.gold_share = (p_gold / max(1, t_snap.gold)) * 100.0
             p.dmg_share = (p_dmg / max(1, team_dmg)) * 100.0 if team_dmg > 0 else 0.0
-            p.gold_efficiency = (p.dmg_share / max(0.01, p.gold_share)) if p.gold_share > 0 else 0.0
+            p.gold_efficiency = (p.dmg_share / max(SMALLEST_NONZERO,p.gold_share)) if p.gold_share > 0 else 0.0
 
     # Inject comparisons into Player analyses
     for pa in analysis.players:
