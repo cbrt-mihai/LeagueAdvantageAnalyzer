@@ -208,14 +208,10 @@ def format_metric(metric):
 # ---------------------------------------------------------------------------
 
 def calculate_player_overall_advantage(player_analysis):
-    """Sum normalized differences across key metrics vs lane opponent."""
-    score = 0.0
-    for stat, metric in player_analysis.comparisons.items():
-        diff = metric["vs_opponent"]["difference"]
-        if stat in LOWER_IS_BETTER:
-            diff = -diff
-        score += diff
-    return score
+    """
+    Backwards-compatible wrapper used by existing ranking code.
+    """
+    return calculate_player_advantage_score(player_analysis)
 
 
 def get_ranked_players(analysis):
@@ -268,12 +264,16 @@ def print_advantage_report(analysis, w: Writer, stats=None):
         if lane is None:
             continue
 
+        lane_score = calculate_lane_advantage_score(lane)
+
         own_player = lane.own_lane.players[0]
         enemy_player = lane.opponent_lane.players[0]
 
         w.print(
             f"\n  {lane_name:<8}"
-            f" {own_player.champion:<14} vs {enemy_player.champion}"
+            f" {own_player.champion:<14} vs {enemy_player.champion:<14}"
+            f"  Lane Advantage: {lane_score:+.1f}"
+            f"  ({advantage_label(lane_score)})"
         )
 
         for stat in stats:
@@ -286,11 +286,14 @@ def print_advantage_report(analysis, w: Writer, stats=None):
     for player_analysis in get_ranked_players(analysis):
         player = player_analysis.player
         opponent = player_analysis.opponent
+        player_score = calculate_player_advantage_score(player_analysis)
 
         w.print(
             f"\n  [{player.participant_id:>2}]"
             f" {player.champion:<14} vs {opponent.champion:<14}"
             f" ({player.lane})"
+            f"  Advantage Score: {player_score:+.1f}"
+            f"  [{champion_advantage_direction(player_score, player.team)}]"
         )
 
         for stat in stats:
@@ -354,7 +357,258 @@ def _print_summary_row(label, summary, w: Writer, indent="  "):
 # Player extremes & stat spectrum reports
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Advantage Score
+# ---------------------------------------------------------------------------
+#
+# Advantage Score is a normalized measure from -100 to +100.
+#
+# For PLAYER / CHAMPION scores:
+#   +100 = extremely ahead of lane opponent
+#      0 = even
+#   -100 = extremely behind lane opponent
+#
+# For TEAM / LANE scores:
+#   Positive = Blue / script-runner team advantage
+#   Negative = Red advantage
+#
+# Each stat difference is normalized against a meaningful threshold,
+# capped to [-1, +1], and then averaged.
+#
+# Deaths are inverted because fewer deaths is better.
+#
 LOWER_IS_BETTER = {"deaths"}
+
+ADVANTAGE_SCORE_THRESHOLDS = {
+    # Economy / progression
+    "gold": 500.0,
+    "gold_per_minute": 50.0,
+    "xp": 300.0,
+    "cs": 10.0,
+    "cs_per_minute": 1.0,
+    "level": 1.0,
+
+    # Combat
+    "kills": 1.0,
+    "deaths": 1.0,
+    "assists": 2.0,
+    "kda": 1.0,
+
+    # Combat stats
+    "attack_damage": 20.0,
+    "ability_power": 30.0,
+    "health": 200.0,
+    "max_health": 200.0,
+    "armor": 10.0,
+    "magic_resist": 10.0,
+    "attack_speed": 0.10,
+    "movement_speed": 10.0,
+    "ability_haste": 10.0,
+    "armor_pen": 5.0,
+    "armor_pen_percent": 5.0,
+    "magic_pen": 5.0,
+    "magic_pen_percent": 5.0,
+    "health_regen": 5.0,
+    "lifesteal": 5.0,
+    "omnivamp": 3.0,
+
+    # Advanced / efficiency
+    "kp_pct": 5.0,
+    "gold_share": 5.0,
+    "dmg_share": 5.0,
+    "gold_efficiency": 0.25,
+    "vision_score": 3.0,
+    "wards_placed": 2.0,
+    "wards_killed": 2.0,
+}
+
+OBJECTIVE_ADVANTAGE_THRESHOLDS = {
+    objective: 1.0
+    for objective in OBJECTIVE_NAMES
+}
+
+
+def _normalized_advantage(difference, threshold):
+    """
+    Convert a raw difference into a bounded [-1, +1] advantage value.
+    """
+    if threshold is None or threshold <= 0:
+        return 0.0
+
+    return max(-1.0, min(1.0, difference / threshold))
+
+
+def _score_from_differences(differences):
+    """
+    Convert a collection of normalized differences into a score from -100
+    to +100.
+    """
+    if not differences:
+        return 0.0
+
+    return (
+        sum(differences) / len(differences)
+    ) * 100.0
+
+
+def calculate_player_advantage_score(player_analysis):
+    """
+    Final Advantage Score for a champion/player.
+
+    Positive = this champion is ahead of their lane opponent.
+    Negative = this champion is behind their lane opponent.
+    """
+    normalized = []
+
+    for stat, metric in player_analysis.comparisons.items():
+        threshold = ADVANTAGE_SCORE_THRESHOLDS.get(stat)
+
+        if threshold is None:
+            continue
+
+        difference = metric["vs_opponent"]["difference"]
+
+        if stat in LOWER_IS_BETTER:
+            difference = -difference
+
+        normalized.append(
+            _normalized_advantage(difference, threshold)
+        )
+
+    return _score_from_differences(normalized)
+
+
+def calculate_lane_advantage_score(lane_analysis):
+    """
+    Final Advantage Score for a lane.
+
+    Positive = Blue/script-runner lane advantage.
+    Negative = Red lane advantage.
+    """
+    normalized = []
+
+    for stat, comparison in lane_analysis.comparisons.items():
+        threshold = ADVANTAGE_SCORE_THRESHOLDS.get(stat)
+
+        if threshold is None:
+            continue
+
+        difference = comparison["vs_opponent_lane"]["total"]["difference"]
+
+        if stat in LOWER_IS_BETTER:
+            difference = -difference
+
+        normalized.append(
+            _normalized_advantage(difference, threshold)
+        )
+
+    return _score_from_differences(normalized)
+
+
+def calculate_team_advantage_score(team_analysis):
+    """
+    Final Advantage Score for the team.
+
+    Positive = Blue/script-runner team advantage.
+    Negative = Red advantage.
+
+    70% player/stat advantage
+    30% objective advantage
+    """
+    stat_scores = []
+
+    for stat, comparison in team_analysis.comparisons.items():
+        threshold = ADVANTAGE_SCORE_THRESHOLDS.get(stat)
+
+        if threshold is None:
+            continue
+
+        difference = comparison["vs_opponent_team"]["difference"]
+
+        if stat in LOWER_IS_BETTER:
+            difference = -difference
+
+        stat_scores.append(
+            _normalized_advantage(difference, threshold)
+        )
+
+    objective_scores = []
+
+    for objective, comparison in team_analysis.objective_comparisons.items():
+        threshold = OBJECTIVE_ADVANTAGE_THRESHOLDS.get(objective)
+
+        if threshold is None:
+            continue
+
+        difference = comparison["difference"]
+
+        objective_scores.append(
+            _normalized_advantage(difference, threshold)
+        )
+
+    stat_score = _score_from_differences(stat_scores)
+    objective_score = _score_from_differences(objective_scores)
+
+    if stat_scores and objective_scores:
+        return (
+            stat_score * 0.70
+            + objective_score * 0.30
+        )
+
+    if stat_scores:
+        return stat_score
+
+    if objective_scores:
+        return objective_score
+
+    return 0.0
+
+
+def advantage_label(score):
+    """
+    Human-readable interpretation of an Advantage Score.
+    """
+    if score >= 50:
+        return "Strong Blue advantage"
+    if score >= 20:
+        return "Blue advantage"
+    if score > 5:
+        return "Slight Blue advantage"
+    if score <= -50:
+        return "Strong Red advantage"
+    if score <= -20:
+        return "Red advantage"
+    if score < -5:
+        return "Slight Red advantage"
+
+    return "Even"
+
+
+def champion_advantage_direction(score, team_id):
+    """
+    Returns the side-relative interpretation for a champion.
+
+    Champion scores are player-relative:
+      positive = that champion is ahead of their opponent.
+
+    This is intentionally different from the Blue-centric team/lane score.
+    """
+    if score > 5:
+        return "Ahead"
+    if score < -5:
+        return "Behind"
+    return "Even"
+
+
+def format_advantage_score(score):
+    """
+    Compact report representation.
+    """
+    if score > 5:
+        return f"{score:+6.1f}  ↑"
+    if score < -5:
+        return f"{score:+6.1f}  ↓"
+    return f"{score:+6.1f}  ="
 
 
 def get_stat_extremes(players, stat):
@@ -1220,8 +1474,23 @@ def print_main_advantage_report(analysis, w: Writer, stats=None):
     w.print("=" * 110)
 
     team = analysis.team_comparisons
+    team_score = calculate_team_advantage_score(team)
 
-    w.print(f"\nTEAM ADVANTAGE ({team_label(team.own_team.team)} vs {team_label(team.opponent_team.team)})")
+    w.print(
+        f"\nTEAM ADVANTAGE "
+        f"({team_label(team.own_team.team)} vs "
+        f"{team_label(team.opponent_team.team)})"
+    )
+
+    w.print(
+        f"  Advantage Score: {team_score:+.1f} / 100"
+        f"  | {advantage_label(team_score)}"
+    )
+
+    w.print(
+        "  Score interpretation: "
+        "-100 = strong Red | 0 = even | +100 = strong Blue"
+    )
     w.print("  " + "-" * 100)
     for stat in stats:
         metric = team.comparisons[stat]["vs_opponent_team"]
@@ -1232,6 +1501,406 @@ def print_main_advantage_report(analysis, w: Writer, stats=None):
     for objective in OBJECTIVE_NAMES:
         metric = team.objective_comparisons[objective]
         w.print(f"  {objective:<24} {format_metric(metric)}")
+
+
+# ---------------------------------------------------------------------------
+# Advantage Score Evolution & Rankings
+# ---------------------------------------------------------------------------
+
+def _get_player_analysis(analysis, participant_id):
+    return next(
+        (
+            pa for pa in analysis.players
+            if pa.player.participant_id == participant_id
+        ),
+        None,
+    )
+
+
+def _get_final_player_scores(analysis):
+    """
+    Return:
+        {
+            participant_id: {
+                "player_analysis": ...,
+                "score": ...,
+            }
+        }
+    """
+    result = {}
+
+    for player_analysis in analysis.players:
+        result[player_analysis.player.participant_id] = {
+            "player_analysis": player_analysis,
+            "score": calculate_player_advantage_score(player_analysis),
+        }
+
+    return result
+
+
+def print_advantage_score_evolution(analyses, w: Writer):
+    """
+    Prints a compact data-point table showing how team, lane and champion
+    advantage evolved at every timestamp.
+    """
+    if not analyses:
+        return
+
+    w.print("\n" + "=" * 110)
+    w.print("ADVANTAGE SCORE EVOLUTION")
+    w.print("=" * 110)
+
+    w.print(
+        "\nScore scale: -100 = strong Red advantage | "
+        "0 = even | +100 = strong Blue advantage"
+    )
+    w.print(
+        "Champion scores are relative to the champion's lane opponent. "
+        "Team and lane scores are Blue-centric."
+    )
+
+    # ------------------------------------------------------------------
+    # Team evolution
+    # ------------------------------------------------------------------
+    w.print("\nTEAM ADVANTAGE SCORE BY TIMESTAMP")
+    w.print("  " + "-" * 100)
+    w.print(
+        f"  {'Time':>6}  "
+        f"{'Blue Score':>12}  "
+        f"{'Red Score':>12}  "
+        f"{'Game State':<25}"
+    )
+    w.print("  " + "-" * 100)
+
+    for analysis in analyses:
+        minute = analysis.game.timestamp / 1000 / 60
+
+        blue_score = calculate_team_advantage_score(
+            analysis.team_comparisons
+        )
+
+        # The same team comparison is Blue-centric.
+        # Red's score is the inverse.
+        red_score = -blue_score
+
+        w.print(
+            f"  {minute:6.1f}  "
+            f"{blue_score:+12.1f}  "
+            f"{red_score:+12.1f}  "
+            f"{advantage_label(blue_score):<25}"
+        )
+
+    # ------------------------------------------------------------------
+    # Lane evolution
+    # ------------------------------------------------------------------
+    w.print("\nLANE ADVANTAGE SCORE BY TIMESTAMP")
+    w.print("  " + "-" * 100)
+    w.print(
+        f"  {'Time':>6}  "
+        f"{'TOP':>10}  "
+        f"{'JUNGLE':>10}  "
+        f"{'MIDDLE':>10}  "
+        f"{'BOTTOM':>10}  "
+        f"{'UTILITY':>10}"
+    )
+    w.print("  " + "-" * 100)
+
+    for analysis in analyses:
+        minute = analysis.game.timestamp / 1000 / 60
+        row = f"  {minute:6.1f}"
+
+        for lane_name in LANE_ORDER:
+            lane = analysis.lanes.get(lane_name)
+
+            if lane is None:
+                row += f" {'N/A':>10}"
+            else:
+                score = calculate_lane_advantage_score(lane)
+                row += f" {score:+10.1f}"
+
+        w.print(row)
+
+    # ------------------------------------------------------------------
+    # Champion evolution
+    # ------------------------------------------------------------------
+    w.print("\nCHAMPION ADVANTAGE SCORE BY TIMESTAMP")
+    w.print("  " + "-" * 100)
+
+    final_players = ordered_snapshots(analyses[-1].game.players)
+
+    header = (
+        f"  {'Time':>6}  "
+        f"{'Champion':<16} "
+        f"{'Team':<6} "
+        f"{'Lane':<9} "
+        f"{'Score':>9}  "
+        f"{'State':<12}"
+    )
+
+    w.print(header)
+    w.print("  " + "-" * 100)
+
+    for analysis in analyses:
+        minute = analysis.game.timestamp / 1000 / 60
+
+        ordered = sorted(
+            analysis.players,
+            key=lambda pa: (
+                0 if pa.player.team == REPORT_BLUE_TEAM else 1,
+                LANE_ORDER.index(pa.player.lane)
+                if pa.player.lane in LANE_ORDER else 99,
+            ),
+        )
+
+        for player_analysis in ordered:
+            player = player_analysis.player
+            score = calculate_player_advantage_score(player_analysis)
+
+            w.print(
+                f"  {minute:6.1f}  "
+                f"{player.champion:<16} "
+                f"{team_label(player.team):<6} "
+                f"{player.lane:<9} "
+                f"{score:+9.1f}  "
+                f"{champion_advantage_direction(score, player.team):<12}"
+            )
+
+    # ------------------------------------------------------------------
+    # Final compact data-point table
+    # ------------------------------------------------------------------
+    w.print("\nFINAL ADVANTAGE SCORE DATA POINTS")
+    w.print("  " + "-" * 100)
+    w.print(
+        f"  {'Team':<6} "
+        f"{'Lane':<9} "
+        f"{'Champion':<16} "
+        f"{'Player':<24} "
+        f"{'Final Score':>12}  "
+        f"{'Interpretation':<22}"
+    )
+    w.print("  " + "-" * 100)
+
+    for player in final_players:
+        player_analysis = _get_player_analysis(
+            analyses[-1],
+            player.participant_id,
+        )
+
+        if player_analysis is None:
+            continue
+
+        score = calculate_player_advantage_score(player_analysis)
+
+        w.print(
+            f"  {team_label(player.team):<6} "
+            f"{player.lane:<9} "
+            f"{player.champion:<16} "
+            f"{(player.name + '#' + player.tag):<24} "
+            f"{score:+12.1f}  "
+            f"{champion_advantage_direction(score, player.team):<22}"
+        )
+
+
+def print_final_advantage_rankings(analysis, w: Writer):
+    """
+    Prints all requested final rankings:
+
+      - best/worst champion of every lane
+      - best/worst player of every team
+      - best/worst player of the entire game
+      - final Advantage Score for every champion
+      - team rank for every champion
+      - overall game rank for every champion
+    """
+    player_scores = _get_final_player_scores(analysis)
+
+    ranked = sorted(
+        player_scores.values(),
+        key=lambda item: item["score"],
+        reverse=True,
+    )
+
+    # ---------------------------------------------------------------
+    # Overall and team ranks
+    # ---------------------------------------------------------------
+    overall_rank = {
+        item["player_analysis"].player.participant_id: rank
+        for rank, item in enumerate(ranked, start=1)
+    }
+
+    blue_players = sorted(
+        [
+            item
+            for item in player_scores.values()
+            if item["player_analysis"].player.team == REPORT_BLUE_TEAM
+        ],
+        key=lambda item: item["score"],
+        reverse=True,
+    )
+
+    red_team_id = 200 if REPORT_BLUE_TEAM == 100 else 100
+
+    red_players = sorted(
+        [
+            item
+            for item in player_scores.values()
+            if item["player_analysis"].player.team == red_team_id
+        ],
+        key=lambda item: item["score"],
+        reverse=True,
+    )
+
+    team_rank = {}
+
+    for rank, item in enumerate(blue_players, start=1):
+        team_rank[item["player_analysis"].player.participant_id] = rank
+
+    for rank, item in enumerate(red_players, start=1):
+        team_rank[item["player_analysis"].player.participant_id] = rank
+
+    w.print("\n" + "=" * 110)
+    w.print("FINAL ADVANTAGE RANKINGS")
+    w.print("=" * 110)
+
+    w.print(
+        "\nFinal Advantage Score is champion-relative: "
+        "positive means the champion finished ahead of their lane opponent."
+    )
+    w.print(
+        "Team Rank is within that champion's team. "
+        "Overall Rank is across all 10 players."
+    )
+
+    # ---------------------------------------------------------------
+    # Complete ranking table
+    # ---------------------------------------------------------------
+    w.print("\nFINAL CHAMPION / PLAYER RANKING")
+    w.print("  " + "-" * 110)
+    w.print(
+        f"  {'Overall':>7}  "
+        f"{'Team':>5}  "
+        f"{'Team':<6}  "
+        f"{'Lane':<9}  "
+        f"{'Champion':<16}  "
+        f"{'Player':<24}  "
+        f"{'Advantage':>10}"
+    )
+    w.print("  " + "-" * 110)
+
+    for item in ranked:
+        pa = item["player_analysis"]
+        player = pa.player
+        score = item["score"]
+
+        w.print(
+            f"  #{overall_rank[player.participant_id]:>6}  "
+            f"#{team_rank[player.participant_id]:>4}  "
+            f"{team_label(player.team):<6}  "
+            f"{player.lane:<9}  "
+            f"{player.champion:<16}  "
+            f"{(player.name + '#' + player.tag):<24}  "
+            f"{score:+10.1f}"
+        )
+
+    # ---------------------------------------------------------------
+    # Best / Worst Champion of each lane
+    # ---------------------------------------------------------------
+    w.print("\nBEST / WORST CHAMPION OF EACH LANE")
+    w.print("  " + "-" * 100)
+
+    for lane_name in LANE_ORDER:
+        lane_players = [
+            item
+            for item in player_scores.values()
+            if item["player_analysis"].player.lane == lane_name
+        ]
+
+        if not lane_players:
+            continue
+
+        lane_players.sort(
+            key=lambda item: item["score"],
+            reverse=True,
+        )
+
+        best = lane_players[0]
+        worst = lane_players[-1]
+
+        best_p = best["player_analysis"].player
+        worst_p = worst["player_analysis"].player
+
+        w.print(
+            f"\n  {lane_name}:"
+        )
+        w.print(
+            f"    BEST:  {best_p.champion:<16} "
+            f"({best_p.name}#{best_p.tag}) "
+            f"[{team_label(best_p.team)}] "
+            f"Score {best['score']:+.1f}"
+        )
+        w.print(
+            f"    WORST: {worst_p.champion:<16} "
+            f"({worst_p.name}#{worst_p.tag}) "
+            f"[{team_label(worst_p.team)}] "
+            f"Score {worst['score']:+.1f}"
+        )
+
+    # ---------------------------------------------------------------
+    # Best / Worst player of each team
+    # ---------------------------------------------------------------
+    w.print("\nBEST / WORST PLAYER OF EACH TEAM")
+    w.print("  " + "-" * 100)
+
+    for team_name, team_items in (
+        ("Blue", blue_players),
+        ("Red", red_players),
+    ):
+        if not team_items:
+            continue
+
+        best = team_items[0]
+        worst = team_items[-1]
+
+        best_p = best["player_analysis"].player
+        worst_p = worst["player_analysis"].player
+
+        w.print(f"\n  {team_name}:")
+        w.print(
+            f"    BEST:  {best_p.champion:<16} "
+            f"({best_p.name}#{best_p.tag}) "
+            f"{best['score']:+.1f}"
+        )
+        w.print(
+            f"    WORST: {worst_p.champion:<16} "
+            f"({worst_p.name}#{worst_p.tag}) "
+            f"{worst['score']:+.1f}"
+        )
+
+    # ---------------------------------------------------------------
+    # Best / Worst entire game
+    # ---------------------------------------------------------------
+    best = ranked[0]
+    worst = ranked[-1]
+
+    best_p = best["player_analysis"].player
+    worst_p = worst["player_analysis"].player
+
+    w.print("\nBEST / WORST PLAYER OF THE ENTIRE GAME")
+    w.print("  " + "-" * 100)
+
+    w.print(
+        f"  BEST:  {best_p.champion:<16} "
+        f"({best_p.name}#{best_p.tag}) "
+        f"[{team_label(best_p.team)} / {best_p.lane}] "
+        f"Score {best['score']:+.1f}"
+    )
+
+    w.print(
+        f"  WORST: {worst_p.champion:<16} "
+        f"({worst_p.name}#{worst_p.tag}) "
+        f"[{team_label(worst_p.team)} / {worst_p.lane}] "
+        f"Score {worst['score']:+.1f}"
+    )
 
 
 def print_main_final_report(analyses, w: Writer, stats=None):
@@ -1573,6 +2242,308 @@ def write_match_summary_markdown(final_analysis, report_analyses, players, outpu
             )
         f.write("\n")
 
+        # ================================================================
+        # Advantage Score Evolution
+        # ================================================================
+        f.write("## Advantage Score Evolution\n\n")
+
+        f.write(
+            "Advantage Scores are normalized to a **-100 to +100 scale**. "
+            "For teams and lanes, positive values mean Blue advantage. "
+            "For champions, positive values mean that champion is ahead "
+            "of their lane opponent.\n\n"
+        )
+
+        # ---------------------------------------------------------------
+        # Team score evolution
+        # ---------------------------------------------------------------
+        f.write("### Team Advantage Score Evolution\n\n")
+        f.write(
+            "| Time | Blue Score | Red Score | Game State |\n"
+        )
+        f.write(
+            "|---:|---:|---:|---|\n"
+        )
+
+        for a in report_analyses:
+            minute = a.game.timestamp / 1000 / 60
+
+            blue_score = calculate_team_advantage_score(
+                a.team_comparisons
+            )
+            red_score = -blue_score
+
+            f.write(
+                f"| {minute:.1f}m | "
+                f"**{blue_score:+.1f}** | "
+                f"**{red_score:+.1f}** | "
+                f"{advantage_label(blue_score)} |\n"
+            )
+
+        f.write("\n")
+
+        # ---------------------------------------------------------------
+        # Lane score evolution
+        # ---------------------------------------------------------------
+        f.write("### Lane Advantage Score Evolution\n\n")
+        f.write(
+            "| Time | Top | Jungle | Middle | Bottom | Utility |\n"
+        )
+        f.write(
+            "|---:|---:|---:|---:|---:|---:|\n"
+        )
+
+        for a in report_analyses:
+            minute = a.game.timestamp / 1000 / 60
+            values = []
+
+            for lane_name in LANE_ORDER:
+                lane = a.lanes.get(lane_name)
+
+                if lane is None:
+                    values.append("N/A")
+                else:
+                    values.append(
+                        f"{calculate_lane_advantage_score(lane):+.1f}"
+                    )
+
+            f.write(
+                f"| {minute:.1f}m | "
+                f"{values[0]} | "
+                f"{values[1]} | "
+                f"{values[2]} | "
+                f"{values[3]} | "
+                f"{values[4]} |\n"
+            )
+
+        f.write("\n")
+
+        # ---------------------------------------------------------------
+        # Champion score evolution
+        # ---------------------------------------------------------------
+        f.write("### Champion Advantage Score Evolution\n\n")
+        f.write(
+            "| Time | Team | Lane | Champion | Player | Advantage Score | State |\n"
+        )
+        f.write(
+            "|---:|---|---|---|---|---:|---|\n"
+        )
+
+        for a in report_analyses:
+            minute = a.game.timestamp / 1000 / 60
+
+            ordered = sorted(
+                a.players,
+                key=lambda pa: (
+                    0 if pa.player.team == REPORT_BLUE_TEAM else 1,
+                    LANE_ORDER.index(pa.player.lane)
+                    if pa.player.lane in LANE_ORDER else 99,
+                ),
+            )
+
+            for pa in ordered:
+                p = pa.player
+                score = calculate_player_advantage_score(pa)
+
+                f.write(
+                    f"| {minute:.1f}m | "
+                    f"{team_label(p.team)} | "
+                    f"{p.lane} | "
+                    f"**{p.champion}** | "
+                    f"{p.name}#{p.tag} | "
+                    f"**{score:+.1f}** | "
+                    f"{champion_advantage_direction(score, p.team)} |\n"
+                )
+
+        f.write("\n")
+
+        # ================================================================
+        # Final Advantage Rankings
+        # ================================================================
+        f.write("## Final Advantage Rankings\n\n")
+
+        f.write(
+            "Champion Advantage Score measures how far ahead or behind "
+            "each champion finished relative to their lane opponent.\n\n"
+        )
+
+        final_scores = _get_final_player_scores(final_analysis)
+
+        ranked = sorted(
+            final_scores.values(),
+            key=lambda item: item["score"],
+            reverse=True,
+        )
+
+        blue_players = sorted(
+            [
+                item
+                for item in final_scores.values()
+                if item["player_analysis"].player.team == REPORT_BLUE_TEAM
+            ],
+            key=lambda item: item["score"],
+            reverse=True,
+        )
+
+        red_players = sorted(
+            [
+                item
+                for item in final_scores.values()
+                if item["player_analysis"].player.team != REPORT_BLUE_TEAM
+            ],
+            key=lambda item: item["score"],
+            reverse=True,
+        )
+
+        overall_rank = {
+            item["player_analysis"].player.participant_id: rank
+            for rank, item in enumerate(ranked, start=1)
+        }
+
+        team_rank = {}
+
+        for rank, item in enumerate(blue_players, start=1):
+            team_rank[
+                item["player_analysis"].player.participant_id
+            ] = rank
+
+        for rank, item in enumerate(red_players, start=1):
+            team_rank[
+                item["player_analysis"].player.participant_id
+            ] = rank
+
+        # ---------------------------------------------------------------
+        # Every champion
+        # ---------------------------------------------------------------
+        f.write("### Final Advantage Score for Every Champion\n\n")
+        f.write(
+            "| Overall Rank | Team Rank | Team | Lane | Champion | Player | Final Advantage Score |\n"
+        )
+        f.write(
+            "|---:|---:|---|---|---|---|---:|\n"
+        )
+
+        for item in ranked:
+            pa = item["player_analysis"]
+            p = pa.player
+
+            f.write(
+                f"| #{overall_rank[p.participant_id]} | "
+                f"#{team_rank[p.participant_id]} | "
+                f"{team_label(p.team)} | "
+                f"{p.lane} | "
+                f"**{p.champion}** | "
+                f"{p.name}#{p.tag} | "
+                f"**{item['score']:+.1f}** |\n"
+            )
+
+        f.write("\n")
+
+        # ---------------------------------------------------------------
+        # Best / Worst Champion of Each Lane
+        # ---------------------------------------------------------------
+        f.write("### Best / Worst Champion of Each Lane\n\n")
+
+        f.write(
+            "| Lane | Best Champion | Score | Worst Champion | Score |\n"
+        )
+        f.write(
+            "|---|---|---:|---|---:|\n"
+        )
+
+        for lane_name in LANE_ORDER:
+            lane_players = [
+                item
+                for item in final_scores.values()
+                if item["player_analysis"].player.lane == lane_name
+            ]
+
+            if not lane_players:
+                continue
+
+            lane_players.sort(
+                key=lambda item: item["score"],
+                reverse=True,
+            )
+
+            best = lane_players[0]
+            worst = lane_players[-1]
+
+            best_p = best["player_analysis"].player
+            worst_p = worst["player_analysis"].player
+
+            f.write(
+                f"| {lane_name} | "
+                f"**{best_p.champion}** ({team_label(best_p.team)}) | "
+                f"{best['score']:+.1f} | "
+                f"**{worst_p.champion}** ({team_label(worst_p.team)}) | "
+                f"{worst['score']:+.1f} |\n"
+            )
+
+        f.write("\n")
+
+        # ---------------------------------------------------------------
+        # Best / Worst Player of Each Team
+        # ---------------------------------------------------------------
+        f.write("### Best / Worst Player of Each Team\n\n")
+
+        f.write(
+            "| Team | Best Player | Score | Worst Player | Score |\n"
+        )
+        f.write(
+            "|---|---|---:|---|---:|\n"
+        )
+
+        for team_name, team_items in (
+                ("Blue", blue_players),
+                ("Red", red_players),
+        ):
+            if not team_items:
+                continue
+
+            best = team_items[0]
+            worst = team_items[-1]
+
+            best_p = best["player_analysis"].player
+            worst_p = worst["player_analysis"].player
+
+            f.write(
+                f"| {team_name} | "
+                f"**{best_p.champion}** ({best_p.name}) | "
+                f"{best['score']:+.1f} | "
+                f"**{worst_p.champion}** ({worst_p.name}) | "
+                f"{worst['score']:+.1f} |\n"
+            )
+
+        f.write("\n")
+
+        # ---------------------------------------------------------------
+        # Best / Worst of entire game
+        # ---------------------------------------------------------------
+        best = ranked[0]
+        worst = ranked[-1]
+
+        best_p = best["player_analysis"].player
+        worst_p = worst["player_analysis"].player
+
+        f.write("### Best / Worst Player of the Entire Game\n\n")
+
+        f.write(
+            f"- **BEST:** **{best_p.champion}** "
+            f"({best_p.name}#{best_p.tag}, "
+            f"{team_label(best_p.team)} {best_p.lane}) — "
+            f"Advantage Score **{best['score']:+.1f}**.\n"
+        )
+
+        f.write(
+            f"- **WORST:** **{worst_p.champion}** "
+            f"({worst_p.name}#{worst_p.tag}, "
+            f"{team_label(worst_p.team)} {worst_p.lane}) — "
+            f"Advantage Score **{worst['score']:+.1f}**.\n"
+        )
+
+        f.write("\n")
+
         f.write("## Performance Highlights\n\n")
         highest_dmg = max(ordered_players, key=lambda p: p.total_damage)
         highest_eff = max(ordered_players, key=lambda p: calculate_advanced_metrics(p, final_analysis.teams[p.team])['gold_eff'])
@@ -1711,7 +2682,7 @@ def write_player_report(player_info, report_analyses, final_analysis, output_dir
         w.print(f"  {'Stat':<18} {'Laning (10m)':>16} {'Mid (20m)':>16} {'Final':>16}")
         w.print("  " + "-" * 70)
 
-        for stat in ["gold", "xp", "cs", "kills", "deaths"]:
+        for stat in stats:
             row = f"  {stat:<18}"
             for phase_name, snap in phase_snapshots.items():
                 if snap:
@@ -2042,6 +3013,10 @@ def main():
             print_main_advantage_report(analysis, w)
 
         print_main_final_report(report_analyses, w)
+
+        # Explicit Advantage Score evolution and final rankings
+        print_advantage_score_evolution(report_analyses, w)
+        print_final_advantage_rankings(final_analysis, w)
 
     print("\nAll reports successfully created!")
 
