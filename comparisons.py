@@ -2,12 +2,18 @@ from dataclasses import dataclass
 from statistics import mean
 from typing import Optional
 
-
 STAT_NAMES = [
     "gold",
     "xp",
     "cs",
     "level",
+
+    "kills",
+    "deaths",
+    "assists",
+    "kda",
+    "gold_per_minute",
+    "cs_per_minute",
 
     "attack_damage",
     "ability_power",
@@ -61,10 +67,17 @@ OBJECTIVE_NAMES = [
 
 STAT_AGGREGATION = {
     "gold": "sum",
+    "gold_per_minute": "average",
     "xp": "sum",
     "cs": "sum",
+    "cs_per_minute": "average",
 
     "level": "average",
+
+    "kills": "sum",
+    "deaths": "sum",
+    "assists": "sum",
+    "kda": "average",
 
     "attack_damage": "sum",
     "ability_power": "sum",

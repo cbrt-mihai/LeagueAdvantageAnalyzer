@@ -19,9 +19,16 @@ from typing import Optional
 
 STAT_NAMES = [
     "gold",
+    "gold_per_minute",
     "xp",
     "cs",
+    "cs_per_minute",
     "level",
+
+    "kills",
+    "deaths",
+    "assists",
+    "kda",
 
     "attack_damage",
     "ability_power",

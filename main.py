@@ -20,20 +20,26 @@ from advantages import build_match_analysis, STAT_NAMES, OBJECTIVE_NAMES
 # All stats are reported by default.  Override this list to restrict output.
 REPORT_STATS = STAT_NAMES
 
-# Thresholds for "impactful" differences
+# Updated thresholds to include combat metrics
 IMPACTFUL_THRESHOLDS = {
     "gold": 500,
     "xp": 300,
     "cs": 10,
     "level": 1,
+    "kills": 1,
+    "deaths": 1,
+    "assists": 2,
+    "kda": 1.0,
+    "gold_per_minute": 50,
+    "cs_per_minute": 1.0,
     "attack_damage": 20,
     "ability_power": 30,
     "health": 200,
     "max_health": 200,
     "armor": 10,
     "magic_resist": 10,
-    "attack_speed": 20,
-    "movement_speed": 20,
+    "attack_speed": 0.1,
+    "movement_speed": 10,
     "ability_haste": 10,
     "armor_pen": 5,
     "armor_pen_percent": 5,
@@ -57,6 +63,30 @@ IMPACTFUL_OBJECTIVE_THRESHOLDS = {
     "barons": 1,
     "grubs": 1,
 }
+
+
+def extract_kda_from_events(events, up_to_timestamp):
+    """Accumulate kills, deaths, and assists per participant up to timestamp."""
+    stats = {i: {"kills": 0, "deaths": 0, "assists": 0} for i in range(1, 11)}
+
+    for event in events:
+        if event.get("timestamp", 0) > up_to_timestamp:
+            break
+
+        if event.get("type") == "CHAMPION_KILL":
+            killer_id = event.get("killerId", 0)
+            victim_id = event.get("victimId", 0)
+            assisters = event.get("assistingParticipantIds", [])
+
+            if killer_id in stats:
+                stats[killer_id]["kills"] += 1
+            if victim_id in stats:
+                stats[victim_id]["deaths"] += 1
+            for assist_id in assisters:
+                if assist_id in stats:
+                    stats[assist_id]["assists"] += 1
+
+    return stats
 
 
 # ---------------------------------------------------------------------------
@@ -855,19 +885,30 @@ def print_final_report(analyses, w: Writer, stats=None):
 # Snapshot helpers
 # ---------------------------------------------------------------------------
 
-def create_snapshot(frame, player_info):
-    player = frame["participantFrames"][str(player_info["participant_id"])]
+def create_snapshot(frame, player_info, kda_stats=None):
+    participant_id = player_info["participant_id"]
+    player = frame["participantFrames"][str(participant_id)]
 
-    cs = (
-        player["minionsKilled"]
-        + player["jungleMinionsKilled"]
-    )
-
+    cs = player["minionsKilled"] + player["jungleMinionsKilled"]
     stats = player["championStats"]
+    timestamp = frame["timestamp"]
+    gold = player["totalGold"]
+
+    # Calculate rate metrics per minute (timestamp / 1000 / 60)
+    minutes = (timestamp / 1000) / 60
+    gold_per_minute = gold / minutes if minutes > 0 else 0.0
+    cs_per_minute = cs / minutes if minutes > 0 else 0.0
+
+    # Extract KDA stats
+    pkda = kda_stats.get(participant_id, {"kills": 0, "deaths": 0, "assists": 0}) if kda_stats else {"kills": 0, "deaths": 0, "assists": 0}
+    kills = pkda["kills"]
+    deaths = pkda["deaths"]
+    assists = pkda["assists"]
+    kda = (kills + assists) / max(1, deaths)
 
     return PlayerSnapshot(
-        participant_id=player_info["participant_id"],
-        timestamp=frame["timestamp"],
+        participant_id=participant_id,
+        timestamp=timestamp,
         name=player_info["name"],
         tag=player_info["tag"],
         champion=player_info["champion"],
@@ -876,9 +917,14 @@ def create_snapshot(frame, player_info):
         role=player_info["role"],
         level=player["level"],
         xp=player["xp"],
-        gold=player["totalGold"],
+        gold=gold,
         cs=cs,
-
+        kills=kills,
+        deaths=deaths,
+        assists=assists,
+        kda=kda,
+        gold_per_minute=gold_per_minute,
+        cs_per_minute=cs_per_minute,
         attack_damage=stats["attackDamage"],
         ability_power=stats["abilityPower"],
         health=stats["health"],
@@ -887,7 +933,6 @@ def create_snapshot(frame, player_info):
         magic_resist=stats["magicResist"],
         attack_speed=stats["attackSpeed"],
         movement_speed=stats["movementSpeed"],
-
         ability_haste=stats["abilityHaste"],
         armor_pen=stats["armorPen"],
         armor_pen_percent=stats["armorPenPercent"],
@@ -899,14 +944,11 @@ def create_snapshot(frame, player_info):
     )
 
 
-def create_snapshots(frame, players):
-    snapshots = []
-
-    for player_info in players.values():
-        snapshot = create_snapshot(frame, player_info)
-        snapshots.append(snapshot)
-
-    return snapshots
+def create_snapshots(frame, players, kda_stats=None):
+    return [
+        create_snapshot(frame, player_info, kda_stats)
+        for player_info in players.values()
+    ]
 
 def extract_objectives_from_events(events, up_to_timestamp):
     """Extract objective counts from timeline events up to a given timestamp."""
@@ -961,12 +1003,10 @@ def extract_objectives_from_events(events, up_to_timestamp):
 
 def analyze_timeline(frames, players, interval_seconds=60, all_events=None):
     analyses = []
-
     interval_ms = interval_seconds * 1000
     max_timestamp = frames[-1]["timestamp"]
     timestamp = interval_ms
 
-    # Collect all events from frames if not provided
     if all_events is None:
         all_events = []
         for frame in frames:
@@ -974,7 +1014,8 @@ def analyze_timeline(frames, players, interval_seconds=60, all_events=None):
 
     while timestamp <= max_timestamp:
         frame = get_closest_frame(frames, timestamp)
-        snapshots = create_snapshots(frame, players)
+        kda_stats = extract_kda_from_events(all_events, timestamp)
+        snapshots = create_snapshots(frame, players, kda_stats)
         objectives = extract_objectives_from_events(all_events, timestamp)
         analysis = build_match_analysis(snapshots, objectives)
         analyses.append(analysis)
