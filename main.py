@@ -21,6 +21,44 @@ from advantages import build_match_analysis, STAT_NAMES, OBJECTIVE_NAMES
 # All stats are reported by default.  Override this list to restrict output.
 REPORT_STATS = STAT_NAMES
 
+# Report-facing team labels are intentionally independent from Riot's internal
+# team IDs (100/200). Blue is always the script runner's team; Red is the opponent.
+REPORT_BLUE_TEAM = 100
+REPORT_RUNNER_PARTICIPANT_ID = None
+LANE_ORDER = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
+
+def set_report_perspective(runner_team, runner_participant_id=None):
+    global REPORT_BLUE_TEAM, REPORT_RUNNER_PARTICIPANT_ID
+    REPORT_BLUE_TEAM = runner_team
+    REPORT_RUNNER_PARTICIPANT_ID = runner_participant_id
+
+def team_label(team_id):
+    return "Blue" if team_id == REPORT_BLUE_TEAM else "Red"
+
+def ordered_player_infos(players):
+    lane_rank = {lane: i for i, lane in enumerate(LANE_ORDER)}
+    return sorted(
+        players.values(),
+        key=lambda p: (
+            0 if p["participant_id"] == REPORT_RUNNER_PARTICIPANT_ID else 1,
+            0 if p["team"] == REPORT_BLUE_TEAM else 1,
+            lane_rank.get(p["lane"], 99),
+            p["participant_id"],
+        ),
+    )
+
+def ordered_snapshots(players):
+    lane_rank = {lane: i for i, lane in enumerate(LANE_ORDER)}
+    return sorted(
+        players,
+        key=lambda p: (
+            0 if p.participant_id == REPORT_RUNNER_PARTICIPANT_ID else 1,
+            0 if p.team == REPORT_BLUE_TEAM else 1,
+            lane_rank.get(p.lane, 99),
+            p.participant_id,
+        ),
+    )
+
 # Updated thresholds to include combat metrics
 IMPACTFUL_THRESHOLDS = {
     "gold": 500,
@@ -203,7 +241,7 @@ def print_advantage_report(analysis, w: Writer, stats=None):
 
     w.print(
         f"\nTEAM ADVANTAGE"
-        f" (Team {team.own_team.team} vs Team {team.opponent_team.team})"
+        f" ({team_label(team.own_team.team)} vs {team_label(team.opponent_team.team)})"
     )
     w.print("  " + "-" * 100)
 
@@ -368,7 +406,7 @@ def print_player_extremes(analysis, w: Writer, stats=None):
         b_str = ", ".join(best_map[pid]) if best_map[pid] else "(none)"
         w_str = ", ".join(worst_map[pid]) if worst_map[pid] else "(none)"
 
-        w.print(f"\n  [{pid:>2}] {player.champion:<14} (Team {player.team}, {player.lane})")
+        w.print(f"\n  [{pid:>2}] {player.champion:<14} ({team_label(player.team)}, {player.lane})")
         w.print(f"       BEST at:  {b_str}")
         w.print(f"       WORST at: {w_str}")
 
@@ -421,12 +459,12 @@ def write_player_extremes_report(analysis, match_id, timestamp_str, players_dict
 
         w.print("  " + "-" * 66)
 
-        for participant_id, player in players_dict.items():
+        for participant_id, player in sorted(players_dict.items(), key=lambda item: (0 if item[1]["participant_id"] == REPORT_RUNNER_PARTICIPANT_ID else 1, 0 if item[1]["team"] == REPORT_BLUE_TEAM else 1, item[1]["participant_id"])):
             w.print(
                 f"  {participant_id:>2}  "
                 f"{player['champion']:<14} "
                 f"{player['name']:<22} "
-                f"{player['team']:<6} "
+                f"{team_label(player['team']):<6} "
                 f"{player['lane']:<10}"
             )
 
@@ -462,12 +500,12 @@ def write_stat_spectrum_report(analysis, match_id, timestamp_str, players_dict):
 
         w.print("  " + "-" * 66)
 
-        for participant_id, player in players_dict.items():
+        for participant_id, player in sorted(players_dict.items(), key=lambda item: (0 if item[1]["participant_id"] == REPORT_RUNNER_PARTICIPANT_ID else 1, 0 if item[1]["team"] == REPORT_BLUE_TEAM else 1, item[1]["participant_id"])):
             w.print(
                 f"  {participant_id:>2}  "
                 f"{player['champion']:<14} "
                 f"{player['name']:<22} "
-                f"{player['team']:<6} "
+                f"{team_label(player['team']):<6} "
                 f"{player['lane']:<10}"
             )
 
@@ -498,7 +536,7 @@ def print_short_average_report(analyses, w: Writer, stats=None):
     w.print("=" * 110)
 
     # Team stats header
-    w.print("\nTEAM STAT ADVANTAGES (Team 100 vs Team 200)")
+    w.print("\nTEAM STAT ADVANTAGES (Blue vs Red)")
     w.print("  " + "-" * 100)
 
     # Build header row with timestamps
@@ -517,7 +555,7 @@ def print_short_average_report(analyses, w: Writer, stats=None):
         w.print(row)
 
     # Objective advantages
-    w.print("\nOBJECTIVE ADVANTAGES (Team 100 vs Team 200)")
+    w.print("\nOBJECTIVE ADVANTAGES (Blue vs Red)")
     w.print("  " + "-" * 100)
 
     header = f"  {'Objective':<20}"
@@ -589,7 +627,7 @@ def print_impactful_differences_report(analyses, w: Writer, stats=None):
                 impactful_events.append({
                     "minute": minute,
                     "type": "team",
-                    "context": f"Team 100 vs Team 200",
+                    "context": "Blue vs Red",
                     "stat": stat,
                     "difference": diff,
                     "value": metric["value"],
@@ -606,7 +644,7 @@ def print_impactful_differences_report(analyses, w: Writer, stats=None):
                 impactful_events.append({
                     "minute": minute,
                     "type": "objective",
-                    "context": f"Team 100 vs Team 200",
+                    "context": "Blue vs Red",
                     "stat": objective,
                     "difference": diff,
                     "value": metric["value"],
@@ -754,8 +792,8 @@ def print_impactful_differences_report(analyses, w: Writer, stats=None):
             final_event = obj_events[-1]
             w.print(
                 f"    {objective:<16} "
-                f"Team 100: {final_event['value']:.0f}, "
-                f"Team 200: {final_event['reference']:.0f} "
+                f"Blue: {final_event['value']:.0f}, "
+                f"Red: {final_event['reference']:.0f} "
                 f"(final diff: {final_event['difference']:>+.0f})"
             )
 
@@ -829,7 +867,7 @@ def print_final_report(analyses, w: Writer, stats=None):
     team = first.team_comparisons
     w.print(
         f"\nTEAM ADVANTAGE SUMMARY"
-        f" (Team {team.own_team.team} vs Team {team.opponent_team.team})"
+        f" ({team_label(team.own_team.team)} vs {team_label(team.opponent_team.team)})"
     )
     w.print("  " + "-" * 100)
     w.print(
@@ -1041,7 +1079,7 @@ def create_snapshot(frame, player_info, kda_stats=None):
 def create_snapshots(frame, players, kda_stats=None):
     return [
         create_snapshot(frame, player_info, kda_stats)
-        for player_info in players.values()
+        for player_info in ordered_player_infos(players)
     ]
 
 def extract_objectives_from_events(events, up_to_timestamp):
@@ -1109,7 +1147,7 @@ def compute_frame_advanced_metrics(snapshots):
             p.gold_efficiency = (p.dmg_share / max(0.01, p.gold_share)) if p.gold_share > 0 else 0.0
 
 
-def analyze_timeline(frames, players, interval_seconds=60, all_events=None):
+def analyze_timeline(frames, players, interval_seconds=60, all_events=None, perspective_team=100):
     analyses = []
     interval_ms = interval_seconds * 1000
     max_timestamp = frames[-1]["timestamp"]
@@ -1126,7 +1164,7 @@ def analyze_timeline(frames, players, interval_seconds=60, all_events=None):
         snapshots = create_snapshots(frame, players, kda_stats)
         compute_frame_advanced_metrics(snapshots)
         objectives = extract_objectives_from_events(all_events, timestamp)
-        analysis = build_match_analysis(snapshots, objectives)
+        analysis = build_match_analysis(snapshots, objectives, perspective_team=perspective_team)
         analyses.append(analysis)
         timestamp += interval_ms
 
@@ -1151,7 +1189,7 @@ def print_frame(frame, players):
         print(
             f"{info['name']:20} "
             f"{info['champion']:12} "
-            f"Team={info['team']} "
+            f"Team={team_label(info['team'])} "
             f"Level={player['level']:2} "
             f"XP={player['xp']:5} "
             f"Gold={player['totalGold']:5} "
@@ -1183,7 +1221,7 @@ def print_main_advantage_report(analysis, w: Writer, stats=None):
 
     team = analysis.team_comparisons
 
-    w.print(f"\nTEAM ADVANTAGE (Team {team.own_team.team} vs Team {team.opponent_team.team})")
+    w.print(f"\nTEAM ADVANTAGE ({team_label(team.own_team.team)} vs {team_label(team.opponent_team.team)})")
     w.print("  " + "-" * 100)
     for stat in stats:
         metric = team.comparisons[stat]["vs_opponent_team"]
@@ -1214,7 +1252,7 @@ def print_main_final_report(analyses, w: Writer, stats=None):
     w.print("=" * 110)
 
     team = first.team_comparisons
-    w.print(f"\nTEAM ADVANTAGE SUMMARY (Team {team.own_team.team} vs Team {team.opponent_team.team})")
+    w.print(f"\nTEAM ADVANTAGE SUMMARY ({team_label(team.own_team.team)} vs {team_label(team.opponent_team.team)})")
     w.print("  " + "-" * 100)
     w.print(f"  {'stat':<24}  {'avg diff':>13}   {'peak diff':>13}   {'@ min':>5}   {'final diff':>13}   {'@ min':>5}")
     w.print("  " + "-" * 100)
@@ -1303,15 +1341,15 @@ def write_swings_report(report_analyses, output_dir):
                 favored_team = 100 if gold_swing >= 0 else 200
 
                 w.print(f"[{prev_time:.0f}m -> {curr_time:.0f}m] MOMENTUM SWING")
-                w.print(f"  Favored Team: Team {favored_team}")
+                w.print(f"  Favored Team: {team_label(favored_team)}")
                 w.print(f"  Gold Swing:   {gold_swing:+7.0f} (Net Diff: {curr_gold_diff:+7.0f})")
                 w.print(f"  XP Swing:     {xp_swing:+7.0f} (Net Diff: {curr_xp_diff:+7.0f})")
-                w.print(f"  Teamfights:   Team 100 (+{t100_kills} kills) vs Team 200 (+{t200_kills} kills)")
+                w.print(f"  Teamfights:   Blue (+{t100_kills if REPORT_BLUE_TEAM == 100 else t200_kills} kills) vs Red (+{t200_kills if REPORT_BLUE_TEAM == 100 else t100_kills} kills)")
 
                 if t100_objs:
-                    w.print(f"  Team 100 Objectives: {', '.join(t100_objs)}")
+                    w.print(f"  {team_label(100)} Objectives: {', '.join(t100_objs)}")
                 if t200_objs:
-                    w.print(f"  Team 200 Objectives: {', '.join(t200_objs)}")
+                    w.print(f"  {team_label(200)} Objectives: {', '.join(t200_objs)}")
                 w.print("")
 
         if swings_found == 0:
@@ -1395,126 +1433,159 @@ def write_objectives_report(all_events, output_dir):
                 detail = f"Plate ({e.get('laneType', '')})"
                 team = e.get("teamId", "N/A")
 
-            w.print(f"  {ts_min:5.1f}m   {etype:<24}  {detail:<20}  Team {team}")
+            w.print(f"  {ts_min:5.1f}m   {etype:<24}  {detail:<20}  {team_label(team) if isinstance(team, int) and team in (100, 200) else team}")
 
 
 def write_match_summary_markdown(final_analysis, report_analyses, players, output_dir):
-    """Generates a concise, high-signal Markdown match summary consolidating all sub-reports."""
+    """Write a comprehensive Markdown summary using the runner's team as Blue."""
     filepath = os.path.join(output_dir, "match_summary.md")
-
     game_duration_min = final_analysis.game.timestamp / 1000 / 60
-    t100_final = final_analysis.teams[100]
-    t200_final = final_analysis.teams[200]
+
+    blue_final = final_analysis.teams[REPORT_BLUE_TEAM]
+    red_team_id = 200 if REPORT_BLUE_TEAM == 100 else 100
+    red_final = final_analysis.teams[red_team_id]
+    ordered_players = ordered_snapshots(final_analysis.game.players)
+
+    def pct(value):
+        return f"{value:.1f}%"
 
     with open(filepath, "w", encoding="utf-8") as f:
-        # Header
-        f.write(f"# Match Analysis Summary\n\n")
+        f.write("# Match Analysis Summary\n\n")
         f.write(f"**Game Duration:** {game_duration_min:.1f} minutes  \n")
-        f.write(f"**Final Score:** Team 100 ({t100_final.kills} Kills, {t100_final.gold:,} Gold) vs Team 200 ({t200_final.kills} Kills, {t200_final.gold:,} Gold)\n\n")
+        if REPORT_RUNNER_PARTICIPANT_ID is not None:
+            runner = next((p for p in ordered_players if p.participant_id == REPORT_RUNNER_PARTICIPANT_ID), None)
+            if runner:
+                f.write(f"**Script Runner:** {runner.name}#{runner.tag} — {runner.champion} ({runner.lane})  \n")
+        f.write(
+            f"**Final Score:** Blue ({blue_final.kills} Kills, {blue_final.gold:,} Gold) "
+            f"vs Red ({red_final.kills} Kills, {red_final.gold:,} Gold)\n\n"
+        )
 
-        # 1. Team Roster Overview Table
-        f.write("### Roster & Key Combat Stats\n\n")
-        f.write("| ID | Champion | Player | Team | Role | K/D/A | KP% | Dmg Share | Gold Eff |\n")
-        f.write("|---|---|---|---|---|---|---|---|---|\n")
-
-        all_players = sorted(final_analysis.game.players, key=lambda p: (p.team, p.participant_id))
-        for p in all_players:
-            t_snap = final_analysis.teams[p.team]
-            adv = calculate_advanced_metrics(p, t_snap)
+        f.write("## Team Overview\n\n")
+        f.write("| Team | Kills | Deaths | Assists | Gold | XP | CS | Damage | Vision | Turrets | Inhibitors | Dragons | Heralds | Barons | Grubs |\n")
+        f.write("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+        for label, team in (("Blue", blue_final), ("Red", red_final)):
+            o = team.objectives
             f.write(
-                f"| {p.participant_id} | **{p.champion}** | {p.name} | Team {p.team} | {p.lane} | "
-                f"{p.kills}/{p.deaths}/{p.assists} | {adv['kp_pct']:.1f}% | {adv['dmg_share']:.1f}% | {adv['gold_eff']:.2f}x |\n"
+                f"| {label} | {team.kills} | {team.deaths} | {team.assists} | "
+                f"{team.gold:,} | {team.xp:,} | {team.cs:,} | {team.total_damage:,.0f} | "
+                f"{team.vision_score:.0f} | {o.turrets} | {o.inhibitors} | {o.dragons} | "
+                f"{o.heralds} | {o.barons} | {o.grubs} |\n"
             )
+        f.write("\n")
 
-        f.write("\n---\n\n")
+        f.write("## Final Roster & Player Performance\n\n")
+        f.write("| ID | Team | Lane | Champion | Player | Level | Gold | XP | CS | K/D/A | KP% | Gold Share | Dmg Share | Gold Eff | Vision | Wards Placed | Wards Cleared |\n")
+        f.write("|---:|---|---|---|---|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|\n")
+        for p in ordered_players:
+            adv = calculate_advanced_metrics(p, final_analysis.teams[p.team])
+            runner_mark = " **(Runner)**" if p.participant_id == REPORT_RUNNER_PARTICIPANT_ID else ""
+            f.write(
+                f"| {p.participant_id} | **{team_label(p.team)}** | {p.lane or '-'} | **{p.champion}** | "
+                f"{p.name}#{p.tag}{runner_mark} | {p.level} | {p.gold:,} | {p.xp:,} | {p.cs} | "
+                f"{p.kills}/{p.deaths}/{p.assists} | {pct(adv['kp_pct'])} | {pct(adv['gold_share'])} | "
+                f"{pct(adv['dmg_share'])} | {adv['gold_eff']:.2f}x | {adv['vision_score']:.0f} | "
+                f"{adv['wards_placed']:.0f} | {adv['wards_killed']:.0f} |\n"
+            )
+        f.write("\n")
 
-        # 2. Key Game Swings & Momentum Shifts
-        f.write("### Major Game Swings & Teamfights\n\n")
-        f.write("| Time Window | Favored | Gold Shift | Kills (T100 vs T200) | Objectives Secured |\n")
-        f.write("|---|---|---|---|---|\n")
+        f.write("## Objective Control\n\n")
+        f.write("| Objective | Blue | Red | Difference (Blue - Red) |\n")
+        f.write("|---|---:|---:|---:|\n")
+        blue_o, red_o = blue_final.objectives, red_final.objectives
+        objective_pairs = [
+            ("Turrets", blue_o.turrets, red_o.turrets),
+            ("Outer Turrets", blue_o.outer_turrets, red_o.outer_turrets),
+            ("Inner Turrets", blue_o.inner_turrets, red_o.inner_turrets),
+            ("Inhibitor Turrets", blue_o.inhibitor_turrets, red_o.inhibitor_turrets),
+            ("Nexus Turrets", blue_o.nexus_turrets, red_o.nexus_turrets),
+            ("Inhibitors", blue_o.inhibitors, red_o.inhibitors),
+            ("Dragons", blue_o.dragons, red_o.dragons),
+            ("Elemental Drakes", blue_o.elemental_drakes, red_o.elemental_drakes),
+            ("Rift Heralds", blue_o.heralds, red_o.heralds),
+            ("Barons", blue_o.barons, red_o.barons),
+            ("Void Grubs", blue_o.grubs, red_o.grubs),
+        ]
+        for label, b, r in objective_pairs:
+            f.write(f"| {label} | {b} | {r} | {b-r:+d} |\n")
+        if blue_o.dragon_soul or red_o.dragon_soul:
+            f.write(f"| Dragon Soul | {blue_o.dragon_soul or 'None'} | {red_o.dragon_soul or 'None'} | — |\n")
+        f.write("\n")
 
+        f.write("## Final Lane Matchups\n\n")
+        f.write("| Lane | Blue Player | Blue Champion | Red Player | Red Champion | Gold Diff | XP Diff | CS Diff | K/D/A Diff |\n")
+        f.write("|---|---|---|---|---|---:|---:|---:|---|\n")
+        for lane_name in LANE_ORDER:
+            lane_snap = final_analysis.lanes.get(lane_name)
+            if not lane_snap:
+                continue
+            blue_p = lane_snap.own_lane.players[0]
+            red_p = lane_snap.opponent_lane.players[0]
+            f.write(
+                f"| {lane_name} | {blue_p.name} | {blue_p.champion} | {red_p.name} | {red_p.champion} | "
+                f"{blue_p.gold-red_p.gold:+,.0f} | {blue_p.xp-red_p.xp:+,.0f} | {blue_p.cs-red_p.cs:+d} | "
+                f"{blue_p.kills-red_p.kills:+d}/{red_p.deaths-blue_p.deaths:+d}/{blue_p.assists-red_p.assists:+d} |\n"
+            )
+        f.write("\n")
+
+        f.write("## Major Game Swings & Momentum\n\n")
+        f.write("| Window | Favored | Gold Swing | XP Swing | Kills (Blue - Red) | Objectives Secured |\n")
+        f.write("|---|---|---:|---:|---:|---|\n")
         swing_count = 0
         for i in range(1, len(report_analyses)):
-            prev = report_analyses[i - 1]
-            curr = report_analyses[i]
-
+            prev, curr = report_analyses[i - 1], report_analyses[i]
             prev_time = prev.game.timestamp / 1000 / 60
             curr_time = curr.game.timestamp / 1000 / 60
-
-            gold_swing = (curr.teams[100].gold - curr.teams[200].gold) - (prev.teams[100].gold - prev.teams[200].gold)
-            t100_k = curr.teams[100].kills - prev.teams[100].kills
-            t200_k = curr.teams[200].kills - prev.teams[200].kills
-
-            t100_objs = _get_objective_deltas(prev.teams[100].objectives, curr.teams[100].objectives)
-            t200_objs = _get_objective_deltas(prev.teams[200].objectives, curr.teams[200].objectives)
-
-            if abs(gold_swing) >= 1500 or (t100_k + t200_k) >= 3 or t100_objs or t200_objs:
+            gold_swing = (curr.teams[REPORT_BLUE_TEAM].gold - curr.teams[red_team_id].gold) - (prev.teams[REPORT_BLUE_TEAM].gold - prev.teams[red_team_id].gold)
+            xp_swing = (curr.teams[REPORT_BLUE_TEAM].xp - curr.teams[red_team_id].xp) - (prev.teams[REPORT_BLUE_TEAM].xp - prev.teams[red_team_id].xp)
+            blue_k = curr.teams[REPORT_BLUE_TEAM].kills - prev.teams[REPORT_BLUE_TEAM].kills
+            red_k = curr.teams[red_team_id].kills - prev.teams[red_team_id].kills
+            blue_objs = _get_objective_deltas(prev.teams[REPORT_BLUE_TEAM].objectives, curr.teams[REPORT_BLUE_TEAM].objectives)
+            red_objs = _get_objective_deltas(prev.teams[red_team_id].objectives, curr.teams[red_team_id].objectives)
+            if abs(gold_swing) >= 1500 or abs(xp_swing) >= 1500 or (blue_k + red_k) >= 3 or blue_objs or red_objs:
                 swing_count += 1
-                favored = "Team 100" if gold_swing >= 0 else "Team 200"
-                objs_str = []
-                if t100_objs: objs_str.append(f"T100: {', '.join(t100_objs)}")
-                if t200_objs: objs_str.append(f"T200: {', '.join(t200_objs)}")
-                objs_formatted = "<br>".join(objs_str) if objs_str else "None"
-
-                f.write(f"| {prev_time:.0f}m - {curr_time:.0f}m | {favored} | {gold_swing:+,.0f} | {t100_k} - {t200_k} | {objs_formatted} |\n")
-
+                favored = "Blue" if gold_swing >= 0 else "Red"
+                objectives = []
+                if blue_objs:
+                    objectives.append(f"Blue: {', '.join(blue_objs)}")
+                if red_objs:
+                    objectives.append(f"Red: {', '.join(red_objs)}")
+                f.write(
+                    f"| {prev_time:.0f}m - {curr_time:.0f}m | {favored} | {gold_swing:+,.0f} | {xp_swing:+,.0f} | "
+                    f"{blue_k} - {red_k} | {'; '.join(objectives) or 'None'} |\n"
+                )
         if swing_count == 0:
-            f.write("| N/A | N/A | No major swings detected | 0 - 0 | None |\n")
+            f.write("| N/A | N/A | 0 | 0 | 0 - 0 | No major swings detected |\n")
+        f.write("\n")
 
-        f.write("\n---\n\n")
+        f.write("## Advantage Timeline\n\n")
+        f.write("Net differences are always **Blue - Red**. Positive values favor the script runner's team.\n\n")
+        f.write("| Time | Gold Diff | XP Diff | CS Diff | Kill Diff | Turret Diff | Dragon Diff | Baron Diff | Herald Diff | Grub Diff |\n")
+        f.write("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+        for a in report_analyses:
+            b, r = a.teams[REPORT_BLUE_TEAM], a.teams[red_team_id]
+            bo, ro = b.objectives, r.objectives
+            minute = a.game.timestamp / 1000 / 60
+            f.write(
+                f"| {minute:.0f}m | {b.gold-r.gold:+,.0f} | {b.xp-r.xp:+,.0f} | {b.cs-r.cs:+d} | "
+                f"{b.kills-r.kills:+d} | {bo.turrets-ro.turrets:+d} | {bo.dragons-ro.dragons:+d} | "
+                f"{bo.barons-ro.barons:+d} | {bo.heralds-ro.heralds:+d} | {bo.grubs-ro.grubs:+d} |\n"
+            )
+        f.write("\n")
 
-        # 3. Macro & Objective Summary Table
-        f.write("### Objective & Macro Breakdown\n\n")
-        f.write("| Objective | Team 100 | Team 200 | Net Diff |\n")
-        f.write("|---|---|---|---|\n")
+        f.write("## Performance Highlights\n\n")
+        highest_dmg = max(ordered_players, key=lambda p: p.total_damage)
+        highest_eff = max(ordered_players, key=lambda p: calculate_advanced_metrics(p, final_analysis.teams[p.team])['gold_eff'])
+        highest_vision = max(ordered_players, key=lambda p: p.vision_score)
+        highest_gold = max(ordered_players, key=lambda p: p.gold)
+        highest_kp = max(ordered_players, key=lambda p: calculate_advanced_metrics(p, final_analysis.teams[p.team])['kp_pct'])
+        f.write(f"- **Damage Leader:** {highest_dmg.champion} ({highest_dmg.name}) — {highest_dmg.total_damage:,.0f} champion damage.\n")
+        f.write(f"- **Gold Leader:** {highest_gold.champion} ({highest_gold.name}) — {highest_gold.gold:,} gold.\n")
+        f.write(f"- **Highest Kill Participation:** {highest_kp.champion} ({highest_kp.name}) — {calculate_advanced_metrics(highest_kp, final_analysis.teams[highest_kp.team])['kp_pct']:.1f}%.\n")
+        f.write(f"- **Most Resource Efficient:** {highest_eff.champion} ({highest_eff.name}) — {calculate_advanced_metrics(highest_eff, final_analysis.teams[highest_eff.team])['gold_eff']:.2f}x gold efficiency.\n")
+        f.write(f"- **Vision Leader:** {highest_vision.champion} ({highest_vision.name}) — {highest_vision.vision_score:.0f} vision score, {highest_vision.wards_placed} wards placed, {highest_vision.wards_killed} cleared.\n")
 
-        t100_o = t100_final.objectives
-        t200_o = t200_final.objectives
-
-        macro_items = [
-            ("Turrets (Total)", t100_o.turrets, t200_o.turrets),
-            ("Inhibitors", t100_o.inhibitors, t200_o.inhibitors),
-            ("Dragons", t100_o.dragons, t200_o.dragons),
-            ("Barons", t100_o.barons, t200_o.barons),
-            ("Rift Heralds", t100_o.heralds, t200_o.heralds),
-            ("Void Grubs", t100_o.grubs, t200_o.grubs),
-        ]
-
-        for label, val1, val2 in macro_items:
-            f.write(f"| {label} | {val1} | {val2} | {val1 - val2:+d} |\n")
-
-        f.write("\n---\n\n")
-
-        # 4. Lane Matchup Summary
-        f.write("### Final Lane Differences (Team 100 vs Team 200)\n\n")
-        f.write("| Lane | Matchup | Gold Diff | XP Diff | CS Diff |\n")
-        f.write("|---|---|---|---|---|\n")
-
-        lane_order = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
-        for lane_name in lane_order:
-            lane_snap = final_analysis.lanes.get(lane_name)
-            if lane_snap:
-                own_p = lane_snap.own_lane.players[0]
-                enemy_p = lane_snap.opponent_lane.players[0]
-                g_diff = own_p.gold - enemy_p.gold
-                x_diff = own_p.xp - enemy_p.xp
-                c_diff = own_p.cs - enemy_p.cs
-
-                f.write(f"| {lane_name} | {own_p.champion} vs {enemy_p.champion} | {g_diff:+,.0f} | {x_diff:+,.0f} | {c_diff:+,.0f} |\n")
-
-        f.write("\n---\n\n")
-
-        # 5. Key Standouts & MVPs
-        f.write("### Performance Highlights\n\n")
-
-        highest_dmg = max(all_players, key=lambda p: p.total_damage)
-        highest_eff = max(all_players, key=lambda p: calculate_advanced_metrics(p, final_analysis.teams[p.team])['gold_eff'])
-        highest_vision = max(all_players, key=lambda p: p.vision_score)
-
-        f.write(f"* **Damage Leader:** **{highest_dmg.champion}** ({highest_dmg.name}) with **{highest_dmg.total_damage:,.0f}** total damage to champions.\n")
-        f.write(f"* **Most Resource Efficient:** **{highest_eff.champion}** ({highest_eff.name}) with a **{calculate_advanced_metrics(highest_eff, final_analysis.teams[highest_eff.team])['gold_eff']:.2f}x** Gold Efficiency ratio.\n")
-        f.write(f"* **Vision MVP:** **{highest_vision.champion}** ({highest_vision.name}) with a **{highest_vision.vision_score:.0f}** Vision Score ({highest_vision.wards_placed} placed / {highest_vision.wards_killed} cleared).\n")
-
+    return filepath
 
 def calculate_advanced_metrics(player_snap, team_snap):
     """Calculates KP%, Damage Share, Gold Share, Gold Efficiency, and Vision metrics for a player snapshot."""
@@ -1585,7 +1656,7 @@ def write_player_report(player_info, report_analyses, final_analysis, output_dir
     with Writer(filename) as w:
         w.print("=" * 80)
         w.print(f"PLAYER REPORT: {champ} ({name})")
-        w.print(f"Team: {player_info['team']} | Position: {player_info['lane']}")
+        w.print(f"Team: {team_label(player_info['team'])} | Position: {player_info['lane']}")
         w.print("=" * 80)
 
         # Final Advanced Metrics
@@ -1833,6 +1904,10 @@ def main():
     participants = match["info"]["participants"]
 
     players = {}
+    runner_name = account.get("gameName") or account.get("riotIdGameName")
+    runner_tag = account.get("tagLine") or account.get("riotIdTagline")
+    runner_participant_id = None
+
     for player in participants:
         participant_id = player["participantId"]
         players[participant_id] = {
@@ -1849,6 +1924,19 @@ def main():
             "total_damage": player.get("totalDamageDealtToChampions", 0),
         }
 
+        if (
+            player.get("puuid") == account.get("puuid")
+            or (runner_name and player["riotIdGameName"] == runner_name
+                and (not runner_tag or player["riotIdTagline"] == runner_tag))
+        ):
+            runner_participant_id = participant_id
+
+    if runner_participant_id is None:
+        raise RuntimeError("Could not identify the script runner in the match participants.")
+
+    runner_team = players[runner_participant_id]["team"]
+    set_report_perspective(runner_team, runner_participant_id)
+
     all_events = []
     for frame in frames:
         all_events.extend(frame.get("events", []))
@@ -1858,6 +1946,7 @@ def main():
         players,
         interval_seconds=60,
         all_events=all_events,
+        perspective_team=runner_team,
     )
 
     for analysis in analyses:
@@ -1891,12 +1980,13 @@ def main():
         w.print("  " + "-" * 66)
         w.print(f"  {'ID':>2}  {'Champion':<14} {'Player':<22} {'Team':<6} {'Position':<10}")
         w.print("  " + "-" * 66)
-        for participant_id, player in players.items():
+        for player in ordered_player_infos(players):
+            participant_id = player["participant_id"]
             w.print(
                 f"  {participant_id:>2}  "
                 f"{player['champion']:<14} "
                 f"{player['name']:<22} "
-                f"{player['team']:<6} "
+                f"{team_label(player['team']):<6} "
                 f"{player['lane']:<10}"
             )
         print_stat_spectrum(final_analysis, w)
@@ -1934,12 +2024,13 @@ def main():
         )
         w.print("  " + "-" * 66)
 
-        for participant_id, player in players.items():
+        for player in ordered_player_infos(players):
+            participant_id = player["participant_id"]
             w.print(
                 f"  {participant_id:>2}  "
                 f"{player['champion']:<14} "
                 f"{player['name']:<22} "
-                f"{player['team']:<6} "
+                f"{team_label(player['team']):<6} "
                 f"{player['lane']:<10}"
             )
 

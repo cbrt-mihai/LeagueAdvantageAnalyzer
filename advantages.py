@@ -724,6 +724,7 @@ def build_lane_analysis(
     snapshots: list[PlayerSnapshot],
     teams: dict[int, TeamSnapshot],
     game: GameSnapshot,
+    perspective_team: int = 100,
 ) -> dict[str, LaneAnalysis]:
 
     lanes = [
@@ -735,20 +736,21 @@ def build_lane_analysis(
     ]
 
     results = {}
+    opponent_team = 200 if perspective_team == 100 else 100
 
     for lane in lanes:
 
         own_lane_players = [
             player
             for player in snapshots
-            if player.team == 100
+            if player.team == perspective_team
             and player.lane == lane
         ]
 
         opponent_lane_players = [
             player
             for player in snapshots
-            if player.team == 200
+            if player.team == opponent_team
             and player.lane == lane
         ]
 
@@ -756,14 +758,14 @@ def build_lane_analysis(
             continue
 
         own_lane = LaneSnapshot(
-            team=100,
+            team=perspective_team,
             lane=lane,
             timestamp=game.timestamp,
             players=own_lane_players,
         )
 
         opponent_lane = LaneSnapshot(
-            team=200,
+            team=opponent_team,
             lane=lane,
             timestamp=game.timestamp,
             players=opponent_lane_players,
@@ -772,8 +774,8 @@ def build_lane_analysis(
         comparisons = calculate_lane_comparisons(
             own_lane,
             opponent_lane,
-            teams[100],
-            teams[200],
+            teams[perspective_team],
+            teams[opponent_team],
             game,
         )
 
@@ -790,10 +792,11 @@ def build_lane_analysis(
 def build_team_analysis(
     teams: dict[int, TeamSnapshot],
     game: GameSnapshot,
+    perspective_team: int = 100,
 ) -> TeamAnalysis:
 
-    own_team = teams[100]
-    enemy_team = teams[200]
+    own_team = teams[perspective_team]
+    enemy_team = teams[200 if perspective_team == 100 else 100]
 
     comparisons = calculate_team_comparisons(
         own_team,
@@ -807,7 +810,7 @@ def build_team_analysis(
     )
 
     return TeamAnalysis(
-        team=100,
+        team=perspective_team,
         own_team=own_team,
         opponent_team=enemy_team,
         comparisons=comparisons,
@@ -818,6 +821,7 @@ def build_team_analysis(
 def build_match_analysis(
     snapshots: list[PlayerSnapshot],
     objectives: dict[int, TeamObjectiveSnapshot] = None,
+    perspective_team: int = 100,
 ) -> MatchAnalysis:
 
     if objectives is None:
@@ -868,11 +872,13 @@ def build_match_analysis(
         snapshots,
         teams,
         game,
+        perspective_team=perspective_team,
     )
 
     team_analysis = build_team_analysis(
         teams,
         game,
+        perspective_team=perspective_team,
     )
 
     return MatchAnalysis(
