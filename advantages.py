@@ -47,6 +47,15 @@ STAT_NAMES = [
     "health_regen",
     "lifesteal",
     "omnivamp",
+
+    # Advanced & Vision Metrics
+    "kp_pct",
+    "gold_share",
+    "dmg_share",
+    "gold_efficiency",
+    "vision_score",
+    "wards_placed",
+    "wards_killed"
 ]
 
 
@@ -308,7 +317,8 @@ def compare_player(
 
 def get_stats(obj):
     return {
-        stat: getattr(obj, stat)
+        # Add 0.0 as the fallback if the attribute doesn't exist on the object
+        stat: getattr(obj, stat, 0.0)
         for stat in STAT_NAMES
     }
 

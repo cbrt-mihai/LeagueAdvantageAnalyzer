@@ -72,14 +72,26 @@ ADVANCED_STAT_KEYS = [
 
 
 def extract_kda_from_events(events, up_to_timestamp):
-    """Accumulate kills, deaths, and assists per participant up to timestamp."""
-    stats = {i: {"kills": 0, "deaths": 0, "assists": 0} for i in range(1, 11)}
+    """Accumulate kills, deaths, assists, wards, and running vision score per participant up to timestamp."""
+    stats = {
+        i: {
+            "kills": 0,
+            "deaths": 0,
+            "assists": 0,
+            "wards_placed": 0,
+            "wards_killed": 0,
+            "vision_score": 0.0,
+        }
+        for i in range(1, 11)
+    }
 
     for event in events:
         if event.get("timestamp", 0) > up_to_timestamp:
             break
 
-        if event.get("type") == "CHAMPION_KILL":
+        event_type = event.get("type")
+
+        if event_type == "CHAMPION_KILL":
             killer_id = event.get("killerId", 0)
             victim_id = event.get("victimId", 0)
             assisters = event.get("assistingParticipantIds", [])
@@ -91,6 +103,20 @@ def extract_kda_from_events(events, up_to_timestamp):
             for assist_id in assisters:
                 if assist_id in stats:
                     stats[assist_id]["assists"] += 1
+
+        elif event_type == "WARD_PLACED":
+            creator_id = event.get("creatorId", 0)
+            if creator_id in stats:
+                stats[creator_id]["wards_placed"] += 1
+                # Increment running vision score estimate per ward placed
+                stats[creator_id]["vision_score"] += 1.0
+
+        elif event_type == "WARD_KILL":
+            killer_id = event.get("killerId", 0)
+            if killer_id in stats:
+                stats[killer_id]["wards_killed"] += 1
+                # Increment running vision score estimate per ward cleared
+                stats[killer_id]["vision_score"] += 1.5
 
     return stats
 
@@ -949,17 +975,26 @@ def create_snapshot(frame, player_info, kda_stats=None):
     timestamp = frame["timestamp"]
     gold = player["totalGold"]
 
-    # Calculate rate metrics per minute (timestamp / 1000 / 60)
     minutes = (timestamp / 1000) / 60
     gold_per_minute = gold / minutes if minutes > 0 else 0.0
     cs_per_minute = cs / minutes if minutes > 0 else 0.0
 
-    # Extract KDA stats
-    pkda = kda_stats.get(participant_id, {"kills": 0, "deaths": 0, "assists": 0}) if kda_stats else {"kills": 0, "deaths": 0, "assists": 0}
-    kills = pkda["kills"]
-    deaths = pkda["deaths"]
-    assists = pkda["assists"]
+    default_stats = {
+        "kills": 0, "deaths": 0, "assists": 0,
+        "wards_placed": 0, "wards_killed": 0, "vision_score": 0.0
+    }
+    pkda = kda_stats.get(participant_id, default_stats) if kda_stats else default_stats
+
+    kills = pkda.get("kills", 0)
+    deaths = pkda.get("deaths", 0)
+    assists = pkda.get("assists", 0)
     kda = (kills + assists) / max(1, deaths)
+
+    damage_stats = player.get("damageStats", {})
+    total_damage = damage_stats.get(
+        "totalDamageDoneToChampions",
+        player_info.get("total_damage", 0)
+    )
 
     return PlayerSnapshot(
         participant_id=participant_id,
@@ -996,6 +1031,10 @@ def create_snapshot(frame, player_info, kda_stats=None):
         health_regen=stats["healthRegen"],
         lifesteal=stats["lifesteal"],
         omnivamp=stats["omnivamp"],
+        total_damage=total_damage,
+        vision_score=pkda.get("vision_score", 0.0),
+        wards_placed=pkda.get("wards_placed", 0),
+        wards_killed=pkda.get("wards_killed", 0),
     )
 
 
@@ -1056,6 +1095,20 @@ def extract_objectives_from_events(events, up_to_timestamp):
     return objectives
 
 
+def compute_frame_advanced_metrics(snapshots):
+    teams = {100: [p for p in snapshots if p.team == 100], 200: [p for p in snapshots if p.team == 200]}
+    for team_id, team_players in teams.items():
+        team_kills = max(1, sum(p.kills for p in team_players))
+        team_gold = max(1, sum(p.gold for p in team_players))
+        team_dmg = max(1.0, sum(p.total_damage for p in team_players))
+
+        for p in team_players:
+            p.kp_pct = ((p.kills + p.assists) / team_kills) * 100.0
+            p.gold_share = (p.gold / team_gold) * 100.0
+            p.dmg_share = (p.total_damage / team_dmg) * 100.0
+            p.gold_efficiency = (p.dmg_share / max(0.01, p.gold_share)) if p.gold_share > 0 else 0.0
+
+
 def analyze_timeline(frames, players, interval_seconds=60, all_events=None):
     analyses = []
     interval_ms = interval_seconds * 1000
@@ -1071,6 +1124,7 @@ def analyze_timeline(frames, players, interval_seconds=60, all_events=None):
         frame = get_closest_frame(frames, timestamp)
         kda_stats = extract_kda_from_events(all_events, timestamp)
         snapshots = create_snapshots(frame, players, kda_stats)
+        compute_frame_advanced_metrics(snapshots)
         objectives = extract_objectives_from_events(all_events, timestamp)
         analysis = build_match_analysis(snapshots, objectives)
         analyses.append(analysis)
@@ -1512,33 +1566,27 @@ def write_lane_report(lane_name, report_analyses, output_dir, stats=None):
 
 
 def enrich_analysis_frame(analysis):
-    """Calculates advanced metrics on player models and injects them into comparison dictionaries for any timestamp frame."""
+    """Calculates advanced metrics on player models and injects player/lane comparison dicts for any timestamp frame."""
     for team_id in [100, 200]:
         t_snap = analysis.teams[team_id]
         team_players = [p for p in analysis.game.players if p.team == team_id]
 
         team_dmg = sum(
-            getattr(p, "total_damage", getattr(p, "magic_damage", 0) + getattr(p, "physical_damage", 0))
-            for p in team_players
+            getattr(p, "total_damage", 0) for p in team_players
         )
-        t_snap.total_damage = team_dmg
 
         for p in team_players:
             p_gold = getattr(p, "gold", 0)
             p_kills = getattr(p, "kills", 0)
             p_assists = getattr(p, "assists", 0)
-            p_dmg = getattr(p, "total_damage", getattr(p, "magic_damage", 0) + getattr(p, "physical_damage", 0))
+            p_dmg = getattr(p, "total_damage", 0)
 
-            # Store metrics directly on the PlayerSnapshot model
             p.kp_pct = ((p_kills + p_assists) / max(1, t_snap.kills)) * 100.0
             p.gold_share = (p_gold / max(1, t_snap.gold)) * 100.0
             p.dmg_share = (p_dmg / max(1, team_dmg)) * 100.0 if team_dmg > 0 else 0.0
             p.gold_efficiency = (p.dmg_share / max(0.01, p.gold_share)) if p.gold_share > 0 else 0.0
-            p.vision_score = getattr(p, "vision_score", 0)
-            p.wards_placed = getattr(p, "wards_placed", 0)
-            p.wards_killed = getattr(p, "wards_killed", 0)
 
-    # Inject comparisons against lane opponents and enable arbitrary matchups
+    # Inject comparisons into Player analyses
     for pa in analysis.players:
         p1 = pa.player
         p2 = pa.opponent
@@ -1554,6 +1602,28 @@ def enrich_analysis_frame(analysis):
                     "reference": val2,
                     "difference": diff,
                     "ratio": ratio
+                }
+            }
+
+    # Inject comparisons into Lane analyses
+    for lane_name, lane_analysis in analysis.lanes.items():
+        own_lane = lane_analysis.own_lane
+        opp_lane = lane_analysis.opponent_lane
+
+        for stat in ADVANCED_STAT_KEYS:
+            val1 = getattr(own_lane, stat, 0.0)
+            val2 = getattr(opp_lane, stat, 0.0)
+            diff = val1 - val2
+            ratio = (val1 / val2) if (val2 and val2 != 0) else None
+
+            lane_analysis.comparisons[stat] = {
+                "vs_opponent_lane": {
+                    "total": {
+                        "value": val1,
+                        "reference": val2,
+                        "difference": diff,
+                        "ratio": ratio
+                    }
                 }
             }
 
@@ -1619,6 +1689,10 @@ def main():
             "team": player["teamId"],
             "lane": player["teamPosition"],
             "role": player["individualPosition"],
+            "vision_score": player.get("visionScore", 0),
+            "wards_placed": player.get("wardsPlaced", 0),
+            "wards_killed": player.get("wardsKilled", 0),
+            "total_damage": player.get("totalDamageDealtToChampions", 0),
         }
 
     all_events = []

@@ -46,6 +46,16 @@ class PlayerSnapshot:
     lifesteal: float = 0.0
     omnivamp: float = 0.0
 
+    # Advanced & Vision Metrics
+    total_damage: float = 0.0
+    kp_pct: float = 0.0
+    gold_share: float = 0.0
+    dmg_share: float = 0.0
+    gold_efficiency: float = 0.0
+    vision_score: float = 0.0
+    wards_placed: int = 0
+    wards_killed: int = 0
+
 
 def aggregate_players(players: list[PlayerSnapshot]) -> dict:
     if not players:
@@ -78,6 +88,14 @@ def aggregate_players(players: list[PlayerSnapshot]) -> dict:
         "health_regen": sum(p.health_regen for p in players),
         "lifesteal": sum(p.lifesteal for p in players),
         "omnivamp": sum(p.omnivamp for p in players),
+        "total_damage": sum(p.total_damage for p in players),
+        "kp_pct": sum(p.kp_pct for p in players) / len(players),
+        "gold_share": sum(p.gold_share for p in players),
+        "dmg_share": sum(p.dmg_share for p in players),
+        "gold_efficiency": sum(p.gold_efficiency for p in players) / len(players),
+        "vision_score": sum(p.vision_score for p in players),
+        "wards_placed": sum(p.wards_placed for p in players),
+        "wards_killed": sum(p.wards_killed for p in players),
     }
 
 
@@ -150,6 +168,25 @@ class BaseGroupSnapshot:
     def lifesteal(self) -> float: return sum(p.lifesteal for p in self.players)
     @property
     def omnivamp(self) -> float: return sum(p.omnivamp for p in self.players)
+
+    @property
+    def total_damage(self) -> float: return sum(p.total_damage for p in self.players)
+    @property
+    def kp_pct(self) -> float:
+        return sum(p.kp_pct for p in self.players) / len(self.players) if self.players else 0.0
+    @property
+    def gold_share(self) -> float: return sum(p.gold_share for p in self.players)
+    @property
+    def dmg_share(self) -> float: return sum(p.dmg_share for p in self.players)
+    @property
+    def gold_efficiency(self) -> float:
+        return sum(p.gold_efficiency for p in self.players) / len(self.players) if self.players else 0.0
+    @property
+    def vision_score(self) -> float: return sum(p.vision_score for p in self.players)
+    @property
+    def wards_placed(self) -> int: return sum(p.wards_placed for p in self.players)
+    @property
+    def wards_killed(self) -> int: return sum(p.wards_killed for p in self.players)
 
 
 @dataclass

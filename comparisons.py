@@ -32,6 +32,15 @@ STAT_NAMES = [
     "health_regen",
     "lifesteal",
     "omnivamp",
+
+    # Advanced & Vision Metrics
+    "kp_pct",
+    "gold_share",
+    "dmg_share",
+    "gold_efficiency",
+    "vision_score",
+    "wards_placed",
+    "wards_killed"
 ]
 
 
@@ -97,6 +106,14 @@ STAT_AGGREGATION = {
     "health_regen": "average",
     "lifesteal": "average",
     "omnivamp": "average",
+
+    "kp_pct": "average",
+    "gold_share": "sum",
+    "dmg_share": "sum",
+    "gold_efficiency": "average",
+    "vision_score": "sum",
+    "wards_placed": "sum",
+    "wards_killed": "sum",
 }
 
 
