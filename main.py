@@ -1,5 +1,6 @@
 import sys
 import datetime
+import os
 
 from riot_api import (
     get_account_by_riot_id,
@@ -729,26 +730,31 @@ def print_impactful_differences_report(analyses, w: Writer, stats=None):
 
 
 def print_team_timeline_tables(analyses, w: Writer):
-    """Prints total team stats across all timestamps."""
-    w.print("\n" + "=" * 110)
+    """Prints total team stats across timestamps in chunked 10-minute blocks to prevent line wrapping."""
+    w.print("\n" + "=" * 90)
     w.print("TEAM STATS TIMELINE (TOTALS & AVERAGES)")
-    w.print("=" * 110)
+    w.print("=" * 90)
 
-    timestamps = [a.game.timestamp / 1000 / 60 for a in analyses]
+    CHUNK_SIZE = 10
+    total_frames = len(analyses)
 
     for team_id in [100, 200]:
-        w.print(f"\nTEAM {team_id} TOTALS")
-        header = f"  {'Stat':<20}" + "".join([f"{ts:>7.0f}m" for ts in timestamps])
-        w.print(header)
-        w.print("  " + "-" * (20 + 7 * len(timestamps)))
+        w.print(f"\n--- TEAM {team_id} TOTALS ---")
+        for start_idx in range(0, total_frames, CHUNK_SIZE):
+            chunk = analyses[start_idx:start_idx + CHUNK_SIZE]
+            timestamps = [a.game.timestamp / 1000 / 60 for a in chunk]
 
-        for stat in ["gold", "xp", "cs", "kills", "deaths", "assists"]:
-            row = f"  {stat:<20}"
-            for a in analyses:
-                t_snap = a.teams[team_id]
-                val = getattr(t_snap, stat)
-                row += f"{val:>7.0f}"
-            w.print(row)
+            header = f"  {'Stat':<12}" + "".join([f"{ts:>7.0f}m" for ts in timestamps])
+            w.print("\n" + header)
+            w.print("  " + "-" * (12 + 7 * len(timestamps)))
+
+            for stat in ["gold", "xp", "cs", "kills", "deaths", "assists"]:
+                row = f"  {stat:<12}"
+                for a in chunk:
+                    t_snap = a.teams[team_id]
+                    val = getattr(t_snap, stat)
+                    row += f"{val:>7.0f}"
+                w.print(row)
 
 
 def print_final_report(analyses, w: Writer, stats=None):
@@ -1104,16 +1110,371 @@ def get_closest_frame(frames, timestamp_ms):
 # Entry point
 # ---------------------------------------------------------------------------
 
+def print_main_advantage_report(analysis, w: Writer, stats=None):
+    """Prints team and objective per-interval advantages for the main report."""
+    if stats is None:
+        stats = REPORT_STATS
+
+    minute = analysis.game.timestamp / 1000 / 60
+
+    w.print("\n" + "=" * 110)
+    w.print(f"MATCH ADVANTAGE @ {minute:5.1f} min")
+    w.print("=" * 110)
+
+    team = analysis.team_comparisons
+
+    w.print(f"\nTEAM ADVANTAGE (Team {team.own_team.team} vs Team {team.opponent_team.team})")
+    w.print("  " + "-" * 100)
+    for stat in stats:
+        metric = team.comparisons[stat]["vs_opponent_team"]
+        w.print(f"  {stat:<24} {format_metric(metric)}")
+
+    w.print("\nOBJECTIVE ADVANTAGE")
+    w.print("  " + "-" * 100)
+    for objective in OBJECTIVE_NAMES:
+        metric = team.objective_comparisons[objective]
+        w.print(f"  {objective:<24} {format_metric(metric)}")
+
+
+def print_main_final_report(analyses, w: Writer, stats=None):
+    """Prints general team and objective summaries across the whole game for the main report."""
+    if stats is None:
+        stats = REPORT_STATS
+
+    if not analyses:
+        return
+
+    first = analyses[0]
+    last = analyses[-1]
+    game_start_min = first.game.timestamp / 1000 / 60
+    game_end_min = last.game.timestamp / 1000 / 60
+
+    w.print("\n" + "=" * 110)
+    w.print(f"FINAL MATCH SUMMARY ({game_start_min:.1f} min – {game_end_min:.1f} min)")
+    w.print("=" * 110)
+
+    team = first.team_comparisons
+    w.print(f"\nTEAM ADVANTAGE SUMMARY (Team {team.own_team.team} vs Team {team.opponent_team.team})")
+    w.print("  " + "-" * 100)
+    w.print(f"  {'stat':<24}  {'avg diff':>13}   {'peak diff':>13}   {'@ min':>5}   {'final diff':>13}   {'@ min':>5}")
+    w.print("  " + "-" * 100)
+
+    for stat in stats:
+        series = _collect_stat_series(
+            analyses,
+            lambda a, s=stat: a.team_comparisons.comparisons[s]["vs_opponent_team"]["difference"],
+        )
+        summary = _summarize_series(series)
+        _print_summary_row(stat, summary, w)
+
+    w.print("\nOBJECTIVE ADVANTAGE SUMMARY")
+    w.print("  " + "-" * 100)
+    w.print(f"  {'objective':<24}  {'avg diff':>13}   {'peak diff':>13}   {'@ min':>5}   {'final diff':>13}   {'@ min':>5}")
+    w.print("  " + "-" * 100)
+
+    for objective in OBJECTIVE_NAMES:
+        series = _collect_stat_series(
+            analyses,
+            lambda a, o=objective: a.team_comparisons.objective_comparisons[o]["difference"],
+        )
+        summary = _summarize_series(series)
+        _print_summary_row(objective, summary, w)
+
+
+def write_swings_report(report_analyses, output_dir):
+    """Generates game_swings.txt tracking significant gold and XP momentum shifts."""
+    filename = os.path.join(output_dir, "game_swings.txt")
+
+    with Writer(filename) as w:
+        w.print("=" * 80)
+        w.print("GAME SWINGS & MOMENTUM SHIFTS")
+        w.print("=" * 80)
+        w.print("  (Tracking frame-by-frame gold/XP swings >= 1,500)\n")
+
+        swings_found = 0
+
+        for i in range(1, len(report_analyses)):
+            prev = report_analyses[i - 1]
+            curr = report_analyses[i]
+
+            prev_time = prev.game.timestamp / 1000 / 60
+            curr_time = curr.game.timestamp / 1000 / 60
+
+            # Gold Differential Shift (Team 100 vs Team 200)
+            prev_gold_diff = prev.teams[100].gold - prev.teams[200].gold
+            curr_gold_diff = curr.teams[100].gold - curr.teams[200].gold
+            gold_swing = curr_gold_diff - prev_gold_diff
+
+            # XP Differential Shift
+            prev_xp_diff = prev.teams[100].xp - prev.teams[200].xp
+            curr_xp_diff = curr.teams[100].xp - curr.teams[200].xp
+            xp_swing = curr_xp_diff - prev_xp_diff
+
+            if abs(gold_swing) >= 1500 or abs(xp_swing) >= 1500:
+                swings_found += 1
+                favored_team = 100 if gold_swing > 0 else 200
+                w.print(f"[{prev_time:.0f}m -> {curr_time:.0f}m] MAJOR MOMENTUM SWING")
+                w.print(f"  Favored Team: Team {favored_team}")
+                w.print(f"  Gold Swing:   {gold_swing:+7.0f} (Net Diff: {curr_gold_diff:+7.0f})")
+                w.print(f"  XP Swing:     {xp_swing:+7.0f} (Net Diff: {curr_xp_diff:+7.0f})\n")
+
+        if swings_found == 0:
+            w.print("  No major swings >= 1,500 gold/XP detected in interval checks.")
+
+
+def write_economy_report(report_analyses, players, output_dir):
+    """Generates economy_spikes.txt breaking down gold & CS rates by game phase."""
+    filename = os.path.join(output_dir, "economy_spikes.txt")
+
+    with Writer(filename) as w:
+        w.print("=" * 85)
+        w.print("ECONOMY & CS EFFICIENCY REPORT BY GAME PHASE")
+        w.print("=" * 85)
+
+        phases = {
+            "Laning Phase (0-10m)": [a for a in report_analyses if (a.game.timestamp / 1000 / 60) <= 10],
+            "Mid Game (10-20m)": [a for a in report_analyses if 10 < (a.game.timestamp / 1000 / 60) <= 20],
+            "Late Game (20m+)": [a for a in report_analyses if (a.game.timestamp / 1000 / 60) > 20],
+        }
+
+        for phase_name, frames in phases.items():
+            if not frames:
+                continue
+
+            first_f, last_f = frames[0], frames[-1]
+            start_m = first_f.game.timestamp / 1000 / 60
+            end_m = last_f.game.timestamp / 1000 / 60
+            duration = max(1.0, end_m - start_m)
+
+            w.print(f"\n--- {phase_name} ({start_m:.0f}m - {end_m:.0f}m) ---")
+            w.print(f"  {'ID':>2}  {'Champion':<14}  {'Gold Earned':>12}  {'Gold/Min':>10}  {'CS Gained':>10}  {'CS/Min':>8}")
+            w.print("  " + "-" * 70)
+
+            for pid, player_info in sorted(players.items()):
+                p_start = next(p for p in first_f.game.players if p.participant_id == pid)
+                p_end = next(p for p in last_f.game.players if p.participant_id == pid)
+
+                gold_gained = p_end.gold - p_start.gold
+                cs_gained = p_end.cs - p_start.cs
+
+                gpm = gold_gained / duration
+                cspm = cs_gained / duration
+
+                w.print(
+                    f"  {pid:>2}  {player_info['champion']:<14}  "
+                    f"{gold_gained:>12.0f}  {gpm:>10.1f}  "
+                    f"{cs_gained:>10.0f}  {cspm:>8.1f}"
+                )
+
+
+def write_objectives_report(all_events, output_dir):
+    """Generates objectives_timeline.txt logging macro objectives chronologically."""
+    filename = os.path.join(output_dir, "objectives_timeline.txt")
+
+    objective_types = {"ELITE_MONSTER_KILL", "BUILDING_KILL", "TURRET_PLATE_DESTROYED"}
+
+    obj_events = [e for e in all_events if e.get("type") in objective_types]
+    obj_events.sort(key=lambda x: x.get("timestamp", 0))
+
+    with Writer(filename) as w:
+        w.print("=" * 80)
+        w.print("OBJECTIVES CHRONOLOGICAL TIMELINE")
+        w.print("=" * 80)
+        w.print(f"  {'Time':<8}  {'Event Type':<24}  {'Detail / Subtype':<20}  {'Team':<6}")
+        w.print("  " + "-" * 72)
+
+        for e in obj_events:
+            ts_min = e.get("timestamp", 0) / 1000 / 60
+            etype = e.get("type", "")
+
+            if etype == "ELITE_MONSTER_KILL":
+                detail = e.get("monsterType", "MONSTER")
+                if "monsterSubType" in e:
+                    detail += f" ({e['monsterSubType']})"
+                team = e.get("killerTeamId", "N/A")
+            elif etype == "BUILDING_KILL":
+                detail = f"{e.get('buildingType', 'BUILDING')} ({e.get('laneType', '')})"
+                team = e.get("teamId", "N/A")
+            else:
+                detail = f"Plate ({e.get('laneType', '')})"
+                team = e.get("teamId", "N/A")
+
+            w.print(f"  {ts_min:5.1f}m   {etype:<24}  {detail:<20}  Team {team}")
+
+
+def write_player_report(player_info, report_analyses, final_analysis, output_dir, stats=None):
+    """Generates an individual report with KP%, Best/Worst stats, Phase Deltas, and timeline advantage."""
+    if stats is None:
+        stats = REPORT_STATS
+
+    pid = player_info["participant_id"]
+    champ = player_info["champion"]
+    name = player_info["name"]
+
+    safe_champ = "".join(c for c in champ if c.isalnum() or c in ("_", "-"))
+    safe_name = "".join(c for c in name if c.isalnum() or c in ("_", "-"))
+    filename = os.path.join(output_dir, f"{safe_champ}_{safe_name}.txt")
+
+    with Writer(filename) as w:
+        w.print("=" * 80)
+        w.print(f"PLAYER REPORT: {champ} ({name})")
+        w.print(f"Team: {player_info['team']} | Position: {player_info['lane']}")
+        w.print("=" * 80)
+
+        # 1. Kill Participation (KP%) Calculation at match end
+        final_player = next(p for p in final_analysis.game.players if p.participant_id == pid)
+        team_kills = final_analysis.teams[player_info['team']].kills
+        kp_pct = ((final_player.kills + final_player.assists) / max(1, team_kills)) * 100
+
+        w.print(f"\nPLAYER COMBAT SUMMARY:")
+        w.print(f"  K/D/A: {final_player.kills} / {final_player.deaths} / {final_player.assists}")
+        w.print(f"  Kill Participation (KP%): {kp_pct:.1f}%")
+
+        # 2. Best / Worst Stats for this player at match end
+        best_map = {p.participant_id: [] for p in final_analysis.game.players}
+        worst_map = {p.participant_id: [] for p in final_analysis.game.players}
+
+        for stat in stats:
+            res = get_stat_extremes(final_analysis.game.players, stat)
+            if not res or res[0] is None:
+                continue
+            (best_val, best_players), (worst_val, worst_players) = res
+            for p in best_players:
+                best_map[p.participant_id].append(f"{stat} ({best_val:.0f})")
+            for p in worst_players:
+                worst_map[p.participant_id].append(f"{stat} ({worst_val:.0f})")
+
+        b_str = ", ".join(best_map[pid]) if best_map[pid] else "(none)"
+        w_str = ", ".join(worst_map[pid]) if worst_map[pid] else "(none)"
+
+        w.print(f"  BEST at:  {b_str}")
+        w.print(f"  WORST at: {w_str}\n")
+
+        # 3. Phase-Based Deltas vs Lane Opponent
+        w.print("-" * 80)
+        w.print("PHASE-BASED STAT DELTAS VS OPPONENT (END OF PHASE SNAPSHOTS)")
+        w.print("-" * 80)
+
+        phase_snapshots = {
+            "Laning Phase (10m)": next((a for a in report_analyses if (a.game.timestamp / 1000 / 60) == 10), None),
+            "Mid Game (20m)": next((a for a in report_analyses if (a.game.timestamp / 1000 / 60) == 20), None),
+            "Late Game (Final)": final_analysis,
+        }
+
+        w.print(f"  {'Stat':<18} {'Laning (10m)':>16} {'Mid (20m)':>16} {'Final':>16}")
+        w.print("  " + "-" * 70)
+
+        for stat in ["gold", "xp", "cs", "kills", "deaths"]:
+            row = f"  {stat:<18}"
+            for phase_name, snap in phase_snapshots.items():
+                if snap:
+                    pa = next((p for p in snap.players if p.player.participant_id == pid), None)
+                    diff = pa.comparisons[stat]["vs_opponent"]["difference"] if pa else 0.0
+                    row += f" {diff:>+15.0f}"
+                else:
+                    row += f" {'N/A':>16}"
+            w.print(row)
+
+        # 4. Per-Interval Advantage vs Opponent
+        w.print("\n" + "-" * 80)
+        w.print("INTERVAL ADVANTAGES (VS LANE OPPONENT)")
+        w.print("-" * 80)
+
+        for analysis in report_analyses:
+            minute = analysis.game.timestamp / 1000 / 60
+            pa = next((p for p in analysis.players if p.player.participant_id == pid), None)
+            if pa:
+                w.print(f"\n@ {minute:5.1f} min vs {pa.opponent.champion}:")
+                for stat in stats:
+                    metric = pa.comparisons[stat]["vs_opponent"]
+                    w.print(f"  {stat:<22} {format_metric(metric)}")
+
+        # 5. Overall Advantage Summary across Timeline
+        w.print("\n" + "-" * 80)
+        w.print("TIMELINE ADVANTAGE SUMMARY")
+        w.print("-" * 80)
+        w.print(
+            f"  {'stat':<24}"
+            f"  {'avg diff':>13}"
+            f"   {'peak diff':>13}   {'@ min':>5}"
+            f"   {'final diff':>13}   {'@ min':>5}"
+        )
+        w.print("  " + "-" * 80)
+
+        for stat in stats:
+            series = _collect_stat_series(
+                report_analyses,
+                lambda a, s=stat, p=pid: next(
+                    (
+                        pa2.comparisons[s]["vs_opponent"]["difference"]
+                        for pa2 in a.players
+                        if pa2.player.participant_id == p
+                    ),
+                    None,
+                ),
+            )
+            summary = _summarize_series(series)
+            _print_summary_row(stat, summary, w, indent="  ")
+
+
+def write_lane_report(lane_name, report_analyses, output_dir, stats=None):
+    """Generates an individual report for a single lane across the entire match."""
+    if stats is None:
+        stats = REPORT_STATS
+
+    filename = os.path.join(output_dir, f"Lane_{lane_name}.txt")
+
+    with Writer(filename) as w:
+        w.print("=" * 80)
+        w.print(f"LANE REPORT: {lane_name}")
+        w.print("=" * 80)
+
+        # 1. Per-Interval Lane Totals vs Opponent Lane Totals
+        w.print("\nINTERVAL ADVANTAGES (OWN LANE TOTAL VS OPPONENT LANE TOTAL)")
+        w.print("-" * 80)
+
+        for analysis in report_analyses:
+            minute = analysis.game.timestamp / 1000 / 60
+            lane = analysis.lanes.get(lane_name)
+            if not lane:
+                continue
+            own_player = lane.own_lane.players[0]
+            enemy_player = lane.opponent_lane.players[0]
+
+            w.print(f"\n@ {minute:5.1f} min ({own_player.champion} vs {enemy_player.champion}):")
+            for stat in stats:
+                metric = lane.comparisons[stat]["vs_opponent_lane"]["total"]
+                w.print(f"  {stat:<22} {format_metric(metric)}")
+
+        # 2. Timeline Summary
+        w.print("\n" + "-" * 80)
+        w.print("TIMELINE ADVANTAGE SUMMARY")
+        w.print("-" * 80)
+        w.print(
+            f"  {'stat':<24}"
+            f"  {'avg diff':>13}"
+            f"   {'peak diff':>13}   {'@ min':>5}"
+            f"   {'final diff':>13}   {'@ min':>5}"
+        )
+        w.print("  " + "-" * 80)
+
+        for stat in stats:
+            series = _collect_stat_series(
+                report_analyses,
+                lambda a, s=stat, ln=lane_name: (
+                    a.lanes[ln].comparisons[s]["vs_opponent_lane"]["total"]["difference"]
+                    if ln in a.lanes
+                    else None
+                ),
+            )
+            summary = _summarize_series(series)
+            _print_summary_row(stat, summary, w, indent="  ")
+
+
 def main():
-    account = get_account_by_riot_id(
-        "døinB ryze hack",
-        "EUNE"
-    )
-
+    account = get_account_by_riot_id("døinB ryze hack", "EUNE")
     puuid = account["puuid"]
-
     match_ids = get_match_ids(puuid, count=20)
-
     match_id = match_ids[0]
 
     print(f"Analyzing: {match_id}")
@@ -1121,19 +1482,15 @@ def main():
     match = get_match(match_id)
     timeline = get_timeline(match_id)
 
-    print(f"Game duration: {match['info']['gameDuration']} seconds")
+    game_duration_sec = match["info"]["gameDuration"]
+    print(f"Game duration: {game_duration_sec} seconds")
 
     frames = timeline["info"]["frames"]
-
-    print(f"Number of frames: {len(frames)}")
-
     participants = match["info"]["participants"]
 
     players = {}
-
     for player in participants:
         participant_id = player["participantId"]
-
         players[participant_id] = {
             "participant_id": participant_id,
             "name": player["riotIdGameName"],
@@ -1144,7 +1501,6 @@ def main():
             "role": player["individualPosition"],
         }
 
-    # Collect all events from timeline
     all_events = []
     for frame in frames:
         all_events.extend(frame.get("events", []))
@@ -1156,9 +1512,6 @@ def main():
         all_events=all_events,
     )
 
-    print(f"\nGenerated {len(analyses)} analyses.")
-
-    game_duration_sec = match["info"]["gameDuration"]
     report_start = parse_time("1:00")
     report_end = game_duration_sec
 
@@ -1167,43 +1520,57 @@ def main():
         if report_start <= (a.game.timestamp / 1000) <= report_end
     ]
 
-    # Build the output file name from the match ID and current time
-    timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    # Get the final analysis for extremes/spectrum reports
     final_analysis = report_analyses[-1] if report_analyses else analyses[-1]
 
-    # ----------------------------------------------------------------
-    # Report 1: Player Extremes (separate file)
-    # ----------------------------------------------------------------
-    extremes_filename = write_player_extremes_report(
-        final_analysis, match_id, timestamp_str, players
-    )
-    print(f"Written: {extremes_filename}")
+    # Create directory structure: reports/<matchID>_<YYYYMMDD>/
+    date_str = datetime.datetime.now().strftime("%Y%m%d")
+    folder_name = f"{match_id}_{date_str}"
+    output_dir = os.path.join("reports", folder_name)
+    os.makedirs(output_dir, exist_ok=True)
 
-    # ----------------------------------------------------------------
-    # Report 2: Stat Spectrum (separate file)
-    # ----------------------------------------------------------------
-    spectrum_filename = write_stat_spectrum_report(
-        final_analysis, match_id, timestamp_str, players
-    )
-    print(f"Written: {spectrum_filename}")
+    print(f"\nGenerating reports in directory: {output_dir}")
 
-    # ----------------------------------------------------------------
-    # Report 3: Main Report (existing report)
-    # ----------------------------------------------------------------
-    report_filename = f"report_{match_id}_{timestamp_str}.txt"
-    print(f"Writing main report to: {report_filename}\n")
-
-    with Writer(report_filename) as w:
-
-        # ----------------------------------------------------------------
-        # Header: player roster
-        # ----------------------------------------------------------------
+    # 1. Generate Stat Spectrum Report
+    spectrum_file = os.path.join(output_dir, "stat_spectrum.txt")
+    with Writer(spectrum_file) as w:
         w.print("\n" + "=" * 72)
-        w.print("PLAYERS")
+        w.print("STAT SPECTRUM REPORT")
         w.print("=" * 72)
+        w.print("\nPLAYERS")
+        w.print("  " + "-" * 66)
+        w.print(f"  {'ID':>2}  {'Champion':<14} {'Player':<22} {'Team':<6} {'Position':<10}")
+        w.print("  " + "-" * 66)
+        for participant_id, player in players.items():
+            w.print(
+                f"  {participant_id:>2}  "
+                f"{player['champion']:<14} "
+                f"{player['name']:<22} "
+                f"{player['team']:<6} "
+                f"{player['lane']:<10}"
+            )
+        print_stat_spectrum(final_analysis, w)
 
+    # 2. Generate New Specific Report Files
+    write_swings_report(report_analyses, output_dir)
+    write_economy_report(report_analyses, players, output_dir)
+    write_objectives_report(all_events, output_dir)
+
+    # 3. Generate Per-Player / Per-Champion Reports
+    for player_info in players.values():
+        write_player_report(player_info, report_analyses, final_analysis, output_dir)
+
+    # 4. Generate Per-Lane Reports
+    lane_order = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
+    for lane_name in lane_order:
+        write_lane_report(lane_name, report_analyses, output_dir)
+
+    # 5. Generate Main Summary Report
+    main_report_file = os.path.join(output_dir, "main_report.txt")
+
+    with Writer(main_report_file) as w:
+        w.print("\n" + "=" * 72)
+        w.print("PLAYERS ROSTER")
+        w.print("=" * 72)
         w.print(
             f"  {'ID':>2}  "
             f"{'Champion':<14} "
@@ -1211,7 +1578,6 @@ def main():
             f"{'Team':<6} "
             f"{'Position':<10}"
         )
-
         w.print("  " + "-" * 66)
 
         for participant_id, player in players.items():
@@ -1223,84 +1589,16 @@ def main():
                 f"{player['lane']:<10}"
             )
 
-        # ----------------------------------------------------------------
-        # Short average report (new condensed format)
-        # ----------------------------------------------------------------
-        print_short_average_report(report_analyses, w)
-
         print_team_timeline_tables(report_analyses, w)
-
-        # ----------------------------------------------------------------
-        # Impactful differences report (new)
-        # ----------------------------------------------------------------
+        print_short_average_report(report_analyses, w)
         print_impactful_differences_report(report_analyses, w)
 
-        # ----------------------------------------------------------------
-        # Per-interval advantage reports
-        # ----------------------------------------------------------------
         for analysis in report_analyses:
-            print_advantage_report(analysis, w)
+            print_main_advantage_report(analysis, w)
 
-        # ----------------------------------------------------------------
-        # Final summary
-        # ----------------------------------------------------------------
-        print_final_report(report_analyses, w)
+        print_main_final_report(report_analyses, w)
 
-    # ----------------------------------------------------------------
-    # Custom comparison (console only, not duplicated to the report file)
-    # ----------------------------------------------------------------
-    request = ComparisonRequest(
-        source_id=4,
-        target="opponent",
-        stats=[
-            "gold",
-            "xp",
-            "cs",
-            "ability_power",
-            "attack_damage",
-        ],
-        start="1:00",
-        end="30:00",
-    )
-
-    results = compare_timeline(
-        analyses,
-        request,
-    )
-
-    print("\n" + "=" * 100)
-    print("CUSTOM COMPARISON")
-    print("=" * 100)
-
-    print(
-        f"\n  Source: Malzahar"
-        f"\n  Target: lane opponent"
-        f"\n  Time:   {request.start} - {request.end}"
-        f"\n  Stats:  {', '.join(request.stats)}"
-    )
-
-    for result in results:
-
-        minute = result.timestamp / 1000 / 60
-
-        print(f"\n  {minute:5.1f} min")
-
-        for stat, metric in result.stats.items():
-
-            ratio = metric["ratio"]
-
-            if ratio is None:
-                ratio_text = "N/A"
-            else:
-                ratio_text = f"{ratio:.2f}x"
-
-            print(
-                f"    {stat:<20}"
-                f"{metric['value']:>9.1f}"
-                f" vs {metric['reference']:>9.1f}"
-                f"   diff {metric['difference']:>+9.1f}"
-                f"   {ratio_text:>7}"
-            )
+    print("\nAll reports successfully created!")
 
 
 if __name__ == "__main__":
