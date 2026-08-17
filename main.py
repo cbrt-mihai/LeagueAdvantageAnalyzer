@@ -65,6 +65,11 @@ IMPACTFUL_OBJECTIVE_THRESHOLDS = {
     "grubs": 1,
 }
 
+ADVANCED_STAT_KEYS = [
+    "kp_pct", "gold_share", "dmg_share",
+    "gold_efficiency", "vision_score", "wards_placed", "wards_killed"
+]
+
 
 def extract_kda_from_events(events, up_to_timestamp):
     """Accumulate kills, deaths, and assists per participant up to timestamp."""
@@ -730,10 +735,10 @@ def print_impactful_differences_report(analyses, w: Writer, stats=None):
 
 
 def print_team_timeline_tables(analyses, w: Writer):
-    """Prints total team stats across timestamps in chunked 10-minute blocks to prevent line wrapping."""
-    w.print("\n" + "=" * 90)
+    """Prints total team stats across timestamps in chunked 10-minute blocks with aligned columns."""
+    w.print("\n" + "=" * 95)
     w.print("TEAM STATS TIMELINE (TOTALS & AVERAGES)")
-    w.print("=" * 90)
+    w.print("=" * 95)
 
     CHUNK_SIZE = 10
     total_frames = len(analyses)
@@ -744,16 +749,17 @@ def print_team_timeline_tables(analyses, w: Writer):
             chunk = analyses[start_idx:start_idx + CHUNK_SIZE]
             timestamps = [a.game.timestamp / 1000 / 60 for a in chunk]
 
-            header = f"  {'Stat':<12}" + "".join([f"{ts:>7.0f}m" for ts in timestamps])
+            # Standardized 8-character width per column
+            header = f"  {'Stat':<12}" + "".join([f"{f'{int(ts)}m':>8}" for ts in timestamps])
             w.print("\n" + header)
-            w.print("  " + "-" * (12 + 7 * len(timestamps)))
+            w.print("  " + "-" * (12 + 8 * len(timestamps)))
 
             for stat in ["gold", "xp", "cs", "kills", "deaths", "assists"]:
                 row = f"  {stat:<12}"
                 for a in chunk:
                     t_snap = a.teams[team_id]
-                    val = getattr(t_snap, stat)
-                    row += f"{val:>7.0f}"
+                    val = getattr(t_snap, stat, 0)
+                    row += f"{val:>8.0f}"
                 w.print(row)
 
 
@@ -1302,8 +1308,61 @@ def write_objectives_report(all_events, output_dir):
             w.print(f"  {ts_min:5.1f}m   {etype:<24}  {detail:<20}  Team {team}")
 
 
+def calculate_advanced_metrics(player_snap, team_snap):
+    """Calculates KP%, Damage Share, Gold Share, Gold Efficiency, and Vision metrics for a player snapshot."""
+    kills = getattr(player_snap, "kills", 0)
+    assists = getattr(player_snap, "assists", 0)
+    player_gold = getattr(player_snap, "gold", 0)
+    player_dmg = getattr(player_snap, "total_damage",
+                         getattr(player_snap, "magic_damage", 0) + getattr(player_snap, "physical_damage", 0))
+
+    team_kills = getattr(team_snap, "kills", 0)
+    team_gold = getattr(team_snap, "gold", 0)
+    team_dmg = getattr(team_snap, "total_damage", 0)
+
+    # 1. Kill Participation %
+    kp_pct = ((kills + assists) / max(1, team_kills)) * 100.0
+
+    # 2. Gold Share %
+    gold_share = (player_gold / max(1, team_gold)) * 100.0
+
+    # 3. Damage Share %
+    dmg_share = (player_dmg / max(1, team_dmg)) * 100.0 if team_dmg > 0 else 0.0
+
+    # 4. Gold Efficiency Ratio (Damage Share / Gold Share)
+    gold_eff = (dmg_share / max(0.01, gold_share)) if gold_share > 0 else 0.0
+
+    # 5. Vision Metrics
+    vision_score = getattr(player_snap, "vision_score", 0)
+    wards_placed = getattr(player_snap, "wards_placed", 0)
+    wards_killed = getattr(player_snap, "wards_killed", 0)
+
+    return {
+        "kp_pct": kp_pct,
+        "gold_share": gold_share,
+        "dmg_share": dmg_share,
+        "gold_eff": gold_eff,
+        "vision_score": vision_score,
+        "wards_placed": wards_placed,
+        "wards_killed": wards_killed,
+    }
+
+
+def get_closest_analysis(report_analyses, target_minute, max_diff_minutes=1.5):
+    """Finds the analysis frame closest to target_minute within tolerance."""
+    if not report_analyses:
+        return None
+    closest = min(
+        report_analyses,
+        key=lambda a: abs((a.game.timestamp / 1000 / 60) - target_minute)
+    )
+    if abs((closest.game.timestamp / 1000 / 60) - target_minute) <= max_diff_minutes:
+        return closest
+    return None
+
+
 def write_player_report(player_info, report_analyses, final_analysis, output_dir, stats=None):
-    """Generates an individual report with KP%, Best/Worst stats, Phase Deltas, and timeline advantage."""
+    """Generates individual player report including KP%, Gold Efficiency, Damage Share, and Vision Pressure."""
     if stats is None:
         stats = REPORT_STATS
 
@@ -1321,16 +1380,24 @@ def write_player_report(player_info, report_analyses, final_analysis, output_dir
         w.print(f"Team: {player_info['team']} | Position: {player_info['lane']}")
         w.print("=" * 80)
 
-        # 1. Kill Participation (KP%) Calculation at match end
-        final_player = next(p for p in final_analysis.game.players if p.participant_id == pid)
-        team_kills = final_analysis.teams[player_info['team']].kills
-        kp_pct = ((final_player.kills + final_player.assists) / max(1, team_kills)) * 100
+        # Final Advanced Metrics
+        final_p_snap = next(p for p in final_analysis.game.players if p.participant_id == pid)
+        final_t_snap = final_analysis.teams[player_info["team"]]
+        adv = calculate_advanced_metrics(final_p_snap, final_t_snap)
 
-        w.print(f"\nPLAYER COMBAT SUMMARY:")
-        w.print(f"  K/D/A: {final_player.kills} / {final_player.deaths} / {final_player.assists}")
-        w.print(f"  Kill Participation (KP%): {kp_pct:.1f}%")
+        w.print(f"\nCOMBAT & EFFICIENCY METRICS (MATCH END):")
+        w.print(f"  K/D/A:                  {final_p_snap.kills} / {final_p_snap.deaths} / {final_p_snap.assists}")
+        w.print(f"  Kill Participation:     {adv['kp_pct']:.1f}%")
+        w.print(f"  Damage Share:           {adv['dmg_share']:.1f}%")
+        w.print(f"  Gold Share:             {adv['gold_share']:.1f}%")
+        w.print(f"  Gold Efficiency Ratio:  {adv['gold_eff']:.2f}x (Dmg Share / Gold Share)")
 
-        # 2. Best / Worst Stats for this player at match end
+        w.print(f"\nVISION & MAP PRESSURE (MATCH END):")
+        w.print(f"  Vision Score:           {adv['vision_score']:.0f}")
+        w.print(f"  Wards Placed:           {adv['wards_placed']:.0f}")
+        w.print(f"  Wards Cleared:          {adv['wards_killed']:.0f}")
+
+        # Best / Worst Stats
         best_map = {p.participant_id: [] for p in final_analysis.game.players}
         worst_map = {p.participant_id: [] for p in final_analysis.game.players}
 
@@ -1347,17 +1414,18 @@ def write_player_report(player_info, report_analyses, final_analysis, output_dir
         b_str = ", ".join(best_map[pid]) if best_map[pid] else "(none)"
         w_str = ", ".join(worst_map[pid]) if worst_map[pid] else "(none)"
 
+        w.print(f"\nBEST/WORST AT FINAL SNAPSHOT:")
         w.print(f"  BEST at:  {b_str}")
         w.print(f"  WORST at: {w_str}\n")
 
-        # 3. Phase-Based Deltas vs Lane Opponent
+        # Phase-Based Deltas
         w.print("-" * 80)
-        w.print("PHASE-BASED STAT DELTAS VS OPPONENT (END OF PHASE SNAPSHOTS)")
+        w.print("PHASE-BASED STAT DELTAS VS OPPONENT")
         w.print("-" * 80)
 
         phase_snapshots = {
-            "Laning Phase (10m)": next((a for a in report_analyses if (a.game.timestamp / 1000 / 60) == 10), None),
-            "Mid Game (20m)": next((a for a in report_analyses if (a.game.timestamp / 1000 / 60) == 20), None),
+            "Laning Phase (10m)": get_closest_analysis(report_analyses, 10),
+            "Mid Game (20m)": get_closest_analysis(report_analyses, 20),
             "Late Game (Final)": final_analysis,
         }
 
@@ -1375,7 +1443,7 @@ def write_player_report(player_info, report_analyses, final_analysis, output_dir
                     row += f" {'N/A':>16}"
             w.print(row)
 
-        # 4. Per-Interval Advantage vs Opponent
+        # Per-Interval Advantage vs Opponent
         w.print("\n" + "-" * 80)
         w.print("INTERVAL ADVANTAGES (VS LANE OPPONENT)")
         w.print("-" * 80)
@@ -1389,48 +1457,44 @@ def write_player_report(player_info, report_analyses, final_analysis, output_dir
                     metric = pa.comparisons[stat]["vs_opponent"]
                     w.print(f"  {stat:<22} {format_metric(metric)}")
 
-        # 5. Overall Advantage Summary across Timeline
-        w.print("\n" + "-" * 80)
-        w.print("TIMELINE ADVANTAGE SUMMARY")
-        w.print("-" * 80)
-        w.print(
-            f"  {'stat':<24}"
-            f"  {'avg diff':>13}"
-            f"   {'peak diff':>13}   {'@ min':>5}"
-            f"   {'final diff':>13}   {'@ min':>5}"
-        )
-        w.print("  " + "-" * 80)
-
-        for stat in stats:
-            series = _collect_stat_series(
-                report_analyses,
-                lambda a, s=stat, p=pid: next(
-                    (
-                        pa2.comparisons[s]["vs_opponent"]["difference"]
-                        for pa2 in a.players
-                        if pa2.player.participant_id == p
-                    ),
-                    None,
-                ),
-            )
-            summary = _summarize_series(series)
-            _print_summary_row(stat, summary, w, indent="  ")
-
 
 def write_lane_report(lane_name, report_analyses, output_dir, stats=None):
-    """Generates an individual report for a single lane across the entire match."""
+    """Generates lane report including combined lane vision score and efficiency metrics."""
     if stats is None:
         stats = REPORT_STATS
 
     filename = os.path.join(output_dir, f"Lane_{lane_name}.txt")
+    final_analysis = report_analyses[-1]
 
     with Writer(filename) as w:
         w.print("=" * 80)
         w.print(f"LANE REPORT: {lane_name}")
         w.print("=" * 80)
 
-        # 1. Per-Interval Lane Totals vs Opponent Lane Totals
-        w.print("\nINTERVAL ADVANTAGES (OWN LANE TOTAL VS OPPONENT LANE TOTAL)")
+        # Lane Vision & Efficiency Overview at final snapshot
+        lane_snap = final_analysis.lanes.get(lane_name)
+        if lane_snap:
+            own_p = lane_snap.own_lane.players[0]
+            enemy_p = lane_snap.opponent_lane.players[0]
+
+            own_team_snap = final_analysis.teams[own_p.team]
+            enemy_team_snap = final_analysis.teams[enemy_p.team]
+
+            own_adv = calculate_advanced_metrics(own_p, own_team_snap)
+            enemy_adv = calculate_advanced_metrics(enemy_p, enemy_team_snap)
+
+            w.print(f"\nLANE ADVANCED METRICS COMPARISON (MATCH END):")
+            w.print(f"  {'Metric':<24} {own_p.champion:>15} vs {enemy_p.champion:<15} {'Diff':>10}")
+            w.print("  " + "-" * 68)
+            w.print(f"  {'Kill Participation':<24} {own_adv['kp_pct']:>14.1f}% vs {enemy_adv['kp_pct']:<14.1f}% {own_adv['kp_pct'] - enemy_adv['kp_pct']:>+9.1f}%")
+            w.print(f"  {'Damage Share':<24} {own_adv['dmg_share']:>14.1f}% vs {enemy_adv['dmg_share']:<14.1f}% {own_adv['dmg_share'] - enemy_adv['dmg_share']:>+9.1f}%")
+            w.print(f"  {'Gold Efficiency Ratio':<24} {own_adv['gold_eff']:>15.2f} vs {enemy_adv['gold_eff']:<15.2f} {own_adv['gold_eff'] - enemy_adv['gold_eff']:>+10.2f}")
+            w.print(f"  {'Vision Score':<24} {own_adv['vision_score']:>15.0f} vs {enemy_adv['vision_score']:<15.0f} {own_adv['vision_score'] - enemy_adv['vision_score']:>+10.0f}")
+            w.print(f"  {'Wards Placed':<24} {own_adv['wards_placed']:>15.0f} vs {enemy_adv['wards_placed']:<15.0f} {own_adv['wards_placed'] - enemy_adv['wards_placed']:>+10.0f}")
+
+        # Per-Interval Lane Totals vs Opponent
+        w.print("\n" + "-" * 80)
+        w.print("INTERVAL ADVANTAGES (OWN LANE TOTAL VS OPPONENT LANE TOTAL)")
         w.print("-" * 80)
 
         for analysis in report_analyses:
@@ -1446,29 +1510,85 @@ def write_lane_report(lane_name, report_analyses, output_dir, stats=None):
                 metric = lane.comparisons[stat]["vs_opponent_lane"]["total"]
                 w.print(f"  {stat:<22} {format_metric(metric)}")
 
-        # 2. Timeline Summary
-        w.print("\n" + "-" * 80)
-        w.print("TIMELINE ADVANTAGE SUMMARY")
-        w.print("-" * 80)
-        w.print(
-            f"  {'stat':<24}"
-            f"  {'avg diff':>13}"
-            f"   {'peak diff':>13}   {'@ min':>5}"
-            f"   {'final diff':>13}   {'@ min':>5}"
-        )
-        w.print("  " + "-" * 80)
 
-        for stat in stats:
-            series = _collect_stat_series(
-                report_analyses,
-                lambda a, s=stat, ln=lane_name: (
-                    a.lanes[ln].comparisons[s]["vs_opponent_lane"]["total"]["difference"]
-                    if ln in a.lanes
-                    else None
-                ),
-            )
-            summary = _summarize_series(series)
-            _print_summary_row(stat, summary, w, indent="  ")
+def enrich_analysis_frame(analysis):
+    """Calculates advanced metrics on player models and injects them into comparison dictionaries for any timestamp frame."""
+    for team_id in [100, 200]:
+        t_snap = analysis.teams[team_id]
+        team_players = [p for p in analysis.game.players if p.team == team_id]
+
+        team_dmg = sum(
+            getattr(p, "total_damage", getattr(p, "magic_damage", 0) + getattr(p, "physical_damage", 0))
+            for p in team_players
+        )
+        t_snap.total_damage = team_dmg
+
+        for p in team_players:
+            p_gold = getattr(p, "gold", 0)
+            p_kills = getattr(p, "kills", 0)
+            p_assists = getattr(p, "assists", 0)
+            p_dmg = getattr(p, "total_damage", getattr(p, "magic_damage", 0) + getattr(p, "physical_damage", 0))
+
+            # Store metrics directly on the PlayerSnapshot model
+            p.kp_pct = ((p_kills + p_assists) / max(1, t_snap.kills)) * 100.0
+            p.gold_share = (p_gold / max(1, t_snap.gold)) * 100.0
+            p.dmg_share = (p_dmg / max(1, team_dmg)) * 100.0 if team_dmg > 0 else 0.0
+            p.gold_efficiency = (p.dmg_share / max(0.01, p.gold_share)) if p.gold_share > 0 else 0.0
+            p.vision_score = getattr(p, "vision_score", 0)
+            p.wards_placed = getattr(p, "wards_placed", 0)
+            p.wards_killed = getattr(p, "wards_killed", 0)
+
+    # Inject comparisons against lane opponents and enable arbitrary matchups
+    for pa in analysis.players:
+        p1 = pa.player
+        p2 = pa.opponent
+        for stat in ADVANCED_STAT_KEYS:
+            val1 = getattr(p1, stat, 0.0)
+            val2 = getattr(p2, stat, 0.0) if p2 else 0.0
+            diff = val1 - val2
+            ratio = (val1 / val2) if (val2 and val2 != 0) else None
+
+            pa.comparisons[stat] = {
+                "vs_opponent": {
+                    "value": val1,
+                    "reference": val2,
+                    "difference": diff,
+                    "ratio": ratio
+                }
+            }
+
+
+def compare_champions_at_timestamp(analysis, champion_a, champion_b):
+    """Compares any two champions in the game at a specific timestamp frame across all base and advanced stats."""
+    p_a = next((p for p in analysis.game.players if p.champion.lower() == champion_a.lower()), None)
+    p_b = next((p for p in analysis.game.players if p.champion.lower() == champion_b.lower()), None)
+
+    if not p_a or not p_b:
+        return f"One or both champions ({champion_a}, {champion_b}) not found in frame."
+
+    minute = analysis.game.timestamp / 1000 / 60
+    all_stats = REPORT_STATS + ADVANCED_STAT_KEYS
+    comparison_results = {}
+
+    for stat in all_stats:
+        val_a = getattr(p_a, stat, 0.0)
+        val_b = getattr(p_b, stat, 0.0)
+        diff = val_a - val_b
+        ratio = (val_a / val_b) if val_b != 0 else None
+
+        comparison_results[stat] = {
+            "value": val_a,
+            "reference": val_b,
+            "difference": diff,
+            "ratio": ratio
+        }
+
+    return {
+        "minute": minute,
+        "champion_a": p_a.champion,
+        "champion_b": p_b.champion,
+        "comparisons": comparison_results
+    }
 
 
 def main():
@@ -1511,6 +1631,9 @@ def main():
         interval_seconds=60,
         all_events=all_events,
     )
+
+    for analysis in analyses:
+        enrich_analysis_frame(analysis)
 
     report_start = parse_time("1:00")
     report_end = game_duration_sec
