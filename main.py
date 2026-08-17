@@ -1241,15 +1241,28 @@ def print_main_final_report(analyses, w: Writer, stats=None):
         _print_summary_row(objective, summary, w)
 
 
+def _get_objective_deltas(prev_objs: TeamObjectiveSnapshot, curr_objs: TeamObjectiveSnapshot) -> list[str]:
+    """Calculate objective increases between two snapshots."""
+    deltas = []
+    for obj_name in OBJECTIVE_NAMES:
+        prev_val = getattr(prev_objs, obj_name, 0)
+        curr_val = getattr(curr_objs, obj_name, 0)
+        diff = curr_val - prev_val
+        if diff > 0:
+            formatted_name = obj_name.replace("_", " ").title()
+            deltas.append(f"{diff}x {formatted_name}")
+    return deltas
+
+
 def write_swings_report(report_analyses, output_dir):
-    """Generates game_swings.txt tracking significant gold and XP momentum shifts."""
+    """Generates game_swings.txt tracking gold, XP, kills (teamfights), and objective kills."""
     filename = os.path.join(output_dir, "game_swings.txt")
 
     with Writer(filename) as w:
         w.print("=" * 80)
         w.print("GAME SWINGS & MOMENTUM SHIFTS")
         w.print("=" * 80)
-        w.print("  (Tracking frame-by-frame gold/XP swings >= 1,500)\n")
+        w.print("  (Tracking Gold/XP shifts >= 1,500, Teamfights >= 3 Kills, or Objective Takes)\n")
 
         swings_found = 0
 
@@ -1260,26 +1273,49 @@ def write_swings_report(report_analyses, output_dir):
             prev_time = prev.game.timestamp / 1000 / 60
             curr_time = curr.game.timestamp / 1000 / 60
 
-            # Gold Differential Shift (Team 100 vs Team 200)
+            # Resource Shifts
             prev_gold_diff = prev.teams[100].gold - prev.teams[200].gold
             curr_gold_diff = curr.teams[100].gold - curr.teams[200].gold
             gold_swing = curr_gold_diff - prev_gold_diff
 
-            # XP Differential Shift
             prev_xp_diff = prev.teams[100].xp - prev.teams[200].xp
             curr_xp_diff = curr.teams[100].xp - curr.teams[200].xp
             xp_swing = curr_xp_diff - prev_xp_diff
 
-            if abs(gold_swing) >= 1500 or abs(xp_swing) >= 1500:
+            # Combat / Kill Deltas (Teamfights)
+            t100_kills = curr.teams[100].kills - prev.teams[100].kills
+            t200_kills = curr.teams[200].kills - prev.teams[200].kills
+            total_interval_kills = t100_kills + t200_kills
+
+            # Objective Deltas (Pushes & Neutral Objectives)
+            t100_objs = _get_objective_deltas(prev.teams[100].objectives, curr.teams[100].objectives)
+            t200_objs = _get_objective_deltas(prev.teams[200].objectives, curr.teams[200].objectives)
+            has_objectives = bool(t100_objs or t200_objs)
+
+            # Swing conditions: Big economic shift, multi-kill teamfight, or objective capture with gold movement
+            if (
+                abs(gold_swing) >= 1500
+                or abs(xp_swing) >= 1500
+                or total_interval_kills >= 3
+                or (has_objectives and abs(gold_swing) >= 800)
+            ):
                 swings_found += 1
-                favored_team = 100 if gold_swing > 0 else 200
-                w.print(f"[{prev_time:.0f}m -> {curr_time:.0f}m] MAJOR MOMENTUM SWING")
+                favored_team = 100 if gold_swing >= 0 else 200
+
+                w.print(f"[{prev_time:.0f}m -> {curr_time:.0f}m] MOMENTUM SWING")
                 w.print(f"  Favored Team: Team {favored_team}")
                 w.print(f"  Gold Swing:   {gold_swing:+7.0f} (Net Diff: {curr_gold_diff:+7.0f})")
-                w.print(f"  XP Swing:     {xp_swing:+7.0f} (Net Diff: {curr_xp_diff:+7.0f})\n")
+                w.print(f"  XP Swing:     {xp_swing:+7.0f} (Net Diff: {curr_xp_diff:+7.0f})")
+                w.print(f"  Teamfights:   Team 100 (+{t100_kills} kills) vs Team 200 (+{t200_kills} kills)")
+
+                if t100_objs:
+                    w.print(f"  Team 100 Objectives: {', '.join(t100_objs)}")
+                if t200_objs:
+                    w.print(f"  Team 200 Objectives: {', '.join(t200_objs)}")
+                w.print("")
 
         if swings_found == 0:
-            w.print("  No major swings >= 1,500 gold/XP detected in interval checks.")
+            w.print("  No major swings or key teamfights detected in interval checks.")
 
 
 def write_economy_report(report_analyses, players, output_dir):
@@ -1360,6 +1396,124 @@ def write_objectives_report(all_events, output_dir):
                 team = e.get("teamId", "N/A")
 
             w.print(f"  {ts_min:5.1f}m   {etype:<24}  {detail:<20}  Team {team}")
+
+
+def write_match_summary_markdown(final_analysis, report_analyses, players, output_dir):
+    """Generates a concise, high-signal Markdown match summary consolidating all sub-reports."""
+    filepath = os.path.join(output_dir, "match_summary.md")
+
+    game_duration_min = final_analysis.game.timestamp / 1000 / 60
+    t100_final = final_analysis.teams[100]
+    t200_final = final_analysis.teams[200]
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        # Header
+        f.write(f"# Match Analysis Summary\n\n")
+        f.write(f"**Game Duration:** {game_duration_min:.1f} minutes  \n")
+        f.write(f"**Final Score:** Team 100 ({t100_final.kills} Kills, {t100_final.gold:,} Gold) vs Team 200 ({t200_final.kills} Kills, {t200_final.gold:,} Gold)\n\n")
+
+        # 1. Team Roster Overview Table
+        f.write("### Roster & Key Combat Stats\n\n")
+        f.write("| ID | Champion | Player | Team | Role | K/D/A | KP% | Dmg Share | Gold Eff |\n")
+        f.write("|---|---|---|---|---|---|---|---|---|\n")
+
+        all_players = sorted(final_analysis.game.players, key=lambda p: (p.team, p.participant_id))
+        for p in all_players:
+            t_snap = final_analysis.teams[p.team]
+            adv = calculate_advanced_metrics(p, t_snap)
+            f.write(
+                f"| {p.participant_id} | **{p.champion}** | {p.name} | Team {p.team} | {p.lane} | "
+                f"{p.kills}/{p.deaths}/{p.assists} | {adv['kp_pct']:.1f}% | {adv['dmg_share']:.1f}% | {adv['gold_eff']:.2f}x |\n"
+            )
+
+        f.write("\n---\n\n")
+
+        # 2. Key Game Swings & Momentum Shifts
+        f.write("### Major Game Swings & Teamfights\n\n")
+        f.write("| Time Window | Favored | Gold Shift | Kills (T100 vs T200) | Objectives Secured |\n")
+        f.write("|---|---|---|---|---|\n")
+
+        swing_count = 0
+        for i in range(1, len(report_analyses)):
+            prev = report_analyses[i - 1]
+            curr = report_analyses[i]
+
+            prev_time = prev.game.timestamp / 1000 / 60
+            curr_time = curr.game.timestamp / 1000 / 60
+
+            gold_swing = (curr.teams[100].gold - curr.teams[200].gold) - (prev.teams[100].gold - prev.teams[200].gold)
+            t100_k = curr.teams[100].kills - prev.teams[100].kills
+            t200_k = curr.teams[200].kills - prev.teams[200].kills
+
+            t100_objs = _get_objective_deltas(prev.teams[100].objectives, curr.teams[100].objectives)
+            t200_objs = _get_objective_deltas(prev.teams[200].objectives, curr.teams[200].objectives)
+
+            if abs(gold_swing) >= 1500 or (t100_k + t200_k) >= 3 or t100_objs or t200_objs:
+                swing_count += 1
+                favored = "Team 100" if gold_swing >= 0 else "Team 200"
+                objs_str = []
+                if t100_objs: objs_str.append(f"T100: {', '.join(t100_objs)}")
+                if t200_objs: objs_str.append(f"T200: {', '.join(t200_objs)}")
+                objs_formatted = "<br>".join(objs_str) if objs_str else "None"
+
+                f.write(f"| {prev_time:.0f}m - {curr_time:.0f}m | {favored} | {gold_swing:+,.0f} | {t100_k} - {t200_k} | {objs_formatted} |\n")
+
+        if swing_count == 0:
+            f.write("| N/A | N/A | No major swings detected | 0 - 0 | None |\n")
+
+        f.write("\n---\n\n")
+
+        # 3. Macro & Objective Summary Table
+        f.write("### Objective & Macro Breakdown\n\n")
+        f.write("| Objective | Team 100 | Team 200 | Net Diff |\n")
+        f.write("|---|---|---|---|\n")
+
+        t100_o = t100_final.objectives
+        t200_o = t200_final.objectives
+
+        macro_items = [
+            ("Turrets (Total)", t100_o.turrets, t200_o.turrets),
+            ("Inhibitors", t100_o.inhibitors, t200_o.inhibitors),
+            ("Dragons", t100_o.dragons, t200_o.dragons),
+            ("Barons", t100_o.barons, t200_o.barons),
+            ("Rift Heralds", t100_o.heralds, t200_o.heralds),
+            ("Void Grubs", t100_o.grubs, t200_o.grubs),
+        ]
+
+        for label, val1, val2 in macro_items:
+            f.write(f"| {label} | {val1} | {val2} | {val1 - val2:+d} |\n")
+
+        f.write("\n---\n\n")
+
+        # 4. Lane Matchup Summary
+        f.write("### Final Lane Differences (Team 100 vs Team 200)\n\n")
+        f.write("| Lane | Matchup | Gold Diff | XP Diff | CS Diff |\n")
+        f.write("|---|---|---|---|---|\n")
+
+        lane_order = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
+        for lane_name in lane_order:
+            lane_snap = final_analysis.lanes.get(lane_name)
+            if lane_snap:
+                own_p = lane_snap.own_lane.players[0]
+                enemy_p = lane_snap.opponent_lane.players[0]
+                g_diff = own_p.gold - enemy_p.gold
+                x_diff = own_p.xp - enemy_p.xp
+                c_diff = own_p.cs - enemy_p.cs
+
+                f.write(f"| {lane_name} | {own_p.champion} vs {enemy_p.champion} | {g_diff:+,.0f} | {x_diff:+,.0f} | {c_diff:+,.0f} |\n")
+
+        f.write("\n---\n\n")
+
+        # 5. Key Standouts & MVPs
+        f.write("### Performance Highlights\n\n")
+
+        highest_dmg = max(all_players, key=lambda p: p.total_damage)
+        highest_eff = max(all_players, key=lambda p: calculate_advanced_metrics(p, final_analysis.teams[p.team])['gold_eff'])
+        highest_vision = max(all_players, key=lambda p: p.vision_score)
+
+        f.write(f"* **Damage Leader:** **{highest_dmg.champion}** ({highest_dmg.name}) with **{highest_dmg.total_damage:,.0f}** total damage to champions.\n")
+        f.write(f"* **Most Resource Efficient:** **{highest_eff.champion}** ({highest_eff.name}) with a **{calculate_advanced_metrics(highest_eff, final_analysis.teams[highest_eff.team])['gold_eff']:.2f}x** Gold Efficiency ratio.\n")
+        f.write(f"* **Vision MVP:** **{highest_vision.champion}** ({highest_vision.name}) with a **{highest_vision.vision_score:.0f}** Vision Score ({highest_vision.wards_placed} placed / {highest_vision.wards_killed} cleared).\n")
 
 
 def calculate_advanced_metrics(player_snap, team_snap):
@@ -1752,16 +1906,19 @@ def main():
     write_economy_report(report_analyses, players, output_dir)
     write_objectives_report(all_events, output_dir)
 
-    # 3. Generate Per-Player / Per-Champion Reports
+    # 3. Generate Markdown March Summary
+    write_match_summary_markdown(final_analysis, report_analyses, players, output_dir)
+
+    # 4. Generate Per-Player / Per-Champion Reports
     for player_info in players.values():
         write_player_report(player_info, report_analyses, final_analysis, output_dir)
 
-    # 4. Generate Per-Lane Reports
+    # 5. Generate Per-Lane Reports
     lane_order = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
     for lane_name in lane_order:
         write_lane_report(lane_name, report_analyses, output_dir)
 
-    # 5. Generate Main Summary Report
+    # 6. Generate Main Summary Report
     main_report_file = os.path.join(output_dir, "main_report.txt")
 
     with Writer(main_report_file) as w:
